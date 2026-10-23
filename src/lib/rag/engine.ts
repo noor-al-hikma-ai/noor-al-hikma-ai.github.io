@@ -26,7 +26,9 @@ export function stem(w: string): string {
     .replace(/(ings|ing)$/, "")
     .replace(/(edly|ed)$/, "")
     .replace(/(ers|er)$/, "")
-    .replace(/(s)$/, "");
+    .replace(/(s)$/, "")
+    // Collapse issue / issued / issues to one stem.
+    .replace(/(?<=..)e$/, "");
 }
 
 export function tokenize(text: string): string[] {
