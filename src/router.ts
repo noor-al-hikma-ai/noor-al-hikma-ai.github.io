@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 
-export type Route = "paper" | "walkthrough" | "studio" | "sandbox" | "services" | "trust";
-const ROUTES: Route[] = ["paper", "walkthrough", "studio", "sandbox", "services", "trust"];
+export type Route = "home" | "brief" | "walkthrough" | "studio" | "sandbox" | "services" | "trust";
+const ROUTES: Route[] = ["home", "brief", "walkthrough", "studio", "sandbox", "services", "trust"];
+const ALIASES: Record<string, Route> = { "": "home", paper: "brief" };
 
 function parse(): { route: Route; anchor?: string } {
   const h = window.location.hash.replace(/^#\/?/, "");
   const [path, anchor] = h.split("#");
-  const r = (path || "paper") as Route;
-  return { route: ROUTES.includes(r) ? r : "paper", anchor };
+  const r = (ALIASES[path] ?? path) as Route;
+  return { route: ROUTES.includes(r) ? r : "home", anchor };
 }
 
 export function useRoute() {

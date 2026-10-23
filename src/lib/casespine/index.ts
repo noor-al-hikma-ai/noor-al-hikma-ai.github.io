@@ -6,3 +6,6 @@ export { PALETTE, removeRange } from "./edits";
 export { evalRule, evalClause, clauseText } from "./rules";
 export { EXAMPLES } from "./examples";
 export type * from "./types";
+export { bindingsFor } from "./bindings";
+export { COMPONENTS, cfg } from "./configSchema";
+export { upsertKey, changedLines } from "./edits";

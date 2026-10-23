@@ -1,8 +1,10 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { NetStripe } from "./components/NetStripe";
 import { Logo } from "./components/Logo";
 import { contactHref, SITE } from "./config";
 import { useRoute, type Route } from "./router";
 
+const Home = lazy(() => import("./pages/Home"));
 const Paper = lazy(() => import("./pages/Paper"));
 const Walkthrough = lazy(() => import("./pages/Walkthrough"));
 const Studio = lazy(() => import("./pages/Studio"));
@@ -11,8 +13,7 @@ const Services = lazy(() => import("./pages/Services"));
 const Trust = lazy(() => import("./pages/Trust"));
 
 const NAV: { route: Route; label: string }[] = [
-  { route: "paper", label: "Paper" },
-  { route: "walkthrough", label: "Walkthrough" },
+  { route: "walkthrough", label: "How it works" },
   { route: "studio", label: "Studio" },
   { route: "sandbox", label: "RAG Sandbox" },
   { route: "services", label: "Services" },
@@ -22,6 +23,19 @@ const NAV: { route: Route; label: string }[] = [
 export default function App() {
   const { route, anchor } = useRoute();
   const [open, setOpen] = useState(false);
+  const brandRef = useRef<HTMLAnchorElement>(null);
+  const headerRef = useRef<HTMLElement>(null);
+
+  // The watermark stripe starts right after the brand and runs to the screen edge.
+  useEffect(() => {
+    const b = brandRef.current, h = headerRef.current;
+    if (!b || !h) return;
+    const set = () => h.style.setProperty("--stripe-left", `${b.offsetLeft + b.offsetWidth + 14}px`);
+    set();
+    const ro = new ResizeObserver(set);
+    ro.observe(b);
+    return () => ro.disconnect();
+  }, [route]);
 
   useEffect(() => {
     setOpen(false);
@@ -29,34 +43,33 @@ export default function App() {
     else window.scrollTo({ top: 0 });
   }, [route, anchor]);
 
-  const fullBleed = route === "walkthrough";
   return (
     <>
-      {!fullBleed && (
-        <header className="nav">
-          <a className="nav-brand" href="#/paper" aria-label={`${SITE.name} home`}>
-            <Logo />
-            <b>{SITE.name}</b>
-            <span className="ar-name" lang="ar">{SITE.nameAr}</span>
-          </a>
-          <button className="nav-burger" onClick={() => setOpen(!open)} aria-expanded={open}>
-            Menu
-          </button>
-          <nav className={`nav-links${open ? " open" : ""}`}>
-            {NAV.map((n) => (
-              <a key={n.route} href={`#/${n.route}`} className={route === n.route ? "active" : ""}>
-                {n.label}
-              </a>
-            ))}
-            <a className="btn btn-emerald btn-sm nav-cta" href={contactHref()}>
-              Request a pilot
+      <header className="nav" ref={headerRef}>
+        <NetStripe />
+        <a className="nav-brand" href="#/" aria-label={`${SITE.name} home`} ref={brandRef}>
+          <Logo />
+          <b>{SITE.name}</b>
+          <span className="ar-name" lang="ar">{SITE.nameAr}</span>
+        </a>
+        <button className="nav-burger" onClick={() => setOpen(!open)} aria-expanded={open}>
+          Menu
+        </button>
+        <nav className={`nav-links${open ? " open" : ""}`}>
+          {NAV.map((n) => (
+            <a key={n.route} href={`#/${n.route}`} className={route === n.route ? "active" : ""}>
+              {n.label}
             </a>
-          </nav>
-        </header>
-      )}
+          ))}
+          <a className="btn btn-emerald btn-sm nav-cta" href={contactHref()}>
+            Request a pilot
+          </a>
+        </nav>
+      </header>
       <main>
         <Suspense fallback={<div className="paper muted sans">Loading…</div>}>
-          {route === "paper" && <Paper />}
+          {route === "home" && <Home />}
+          {route === "brief" && <Paper />}
           {route === "walkthrough" && <Walkthrough />}
           {route === "studio" && <Studio />}
           {route === "sandbox" && <Sandbox />}
@@ -64,7 +77,7 @@ export default function App() {
           {route === "trust" && <Trust />}
         </Suspense>
       </main>
-      {!fullBleed && route !== "studio" && (
+      {route !== "studio" && (
         <footer className="footer">
           <div className="footer-inner">
             <div>
@@ -74,6 +87,12 @@ export default function App() {
                 <span lang="ar" style={{ fontFamily: "var(--arabic-display)", color: "var(--gold)" }}>{SITE.nameAr}</span>
               </div>
               <div>{SITE.location} · CaseSpine v5</div>
+              <div className="footer-links">
+                <a href="#/walkthrough">How it works</a>
+                <a href="#/services">Services</a>
+                <a href="#/trust">Trust &amp; compliance</a>
+                <a href="#/brief">Technical brief</a>
+              </div>
             </div>
             <div style={{ maxWidth: 560 }}>
               Demos on this site run entirely in your browser: uploaded documents, indexes and the audit ledger never leave your device.

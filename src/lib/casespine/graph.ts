@@ -192,6 +192,10 @@ export function deriveGraph(c: CaseAST): CaseGraph {
         placeGuards(s.line);
         nodes.filter((n) => n.kind === "preflight").forEach((n) => n.lines.push(s.line));
       }
+      // Retriever Mode in Config prunes the picture: bm25 | dense | hybrid.
+      const mode = (c.config["retriever"]?.["mode"] ?? "hybrid").toLowerCase();
+      const pruned = kinds.filter((k) => !(mode === "bm25" && (k === "dense" || k === "rrf")) && !(mode === "dense" && (k === "bm25" || k === "rrf")));
+      kinds.splice(0, kinds.length, ...pruned);
       const retr = kinds.filter((k) => k === "bm25" || k === "dense");
       if (retr.length) {
         const before = frontier;

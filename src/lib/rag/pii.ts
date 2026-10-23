@@ -35,7 +35,15 @@ export interface PiiReport {
   redacted: Record<string, number>;
 }
 
-export function redactPII(input: string, allowed: string[], counters: Record<string, number> = {}): PiiReport {
+export type Replacement = "token" | "mask" | "hash";
+
+function shortHash(s: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  return (h >>> 0).toString(16).padStart(8, "0").slice(0, 6);
+}
+
+export function redactPII(input: string, allowed: string[], counters: Record<string, number> = {}, mode: Replacement = "token"): PiiReport {
   const found: Record<string, number> = {};
   const redacted: Record<string, number> = {};
   const want = new Set(allowed.map((x) => x.toUpperCase()));
@@ -49,7 +57,8 @@ export function redactPII(input: string, allowed: string[], counters: Record<str
       if (!want.has(d.type)) return full;
       redacted[d.type] = (redacted[d.type] ?? 0) + 1;
       counters[d.type] = (counters[d.type] ?? 0) + 1;
-      const token = `⟦${d.type}#${counters[d.type]}⟧`;
+      const token =
+        mode === "mask" ? "•".repeat(Math.max(4, target.length - 4)) + target.replace(/\s/g, "").slice(-4) : mode === "hash" ? `⟦${d.type}:${shortHash(target)}⟧` : `⟦${d.type}#${counters[d.type]}⟧`;
       return d.group ? full.replace(target, token) : token;
     });
   }

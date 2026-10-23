@@ -6,6 +6,7 @@
 
 import { classifyStep } from "./graph";
 import type { CaseAST, CompileResult, Stage } from "./types";
+import { cfg } from "./configSchema";
 
 const ident = (s: string) => s.replace(/[^A-Za-z0-9]+/g, "") || "Case";
 const snake = (s: string) =>
@@ -219,8 +220,9 @@ export function emitLangGraph(r: CompileResult, c: CaseAST | undefined): string 
       const body: string[] = [];
       if (kinds.includes("preflight")) body.push("    guards.preflight(state, BUDGET, banned=globals().get(\"BANNED_TOPICS\", []))");
       if (kinds.includes("bm25") || kinds.includes("dense") || kinds.includes("rrf"))
-        body.push("    state[\"chunks\"] = retrieval.hybrid(state[\"inquiry\"], k=4, fusion=\"rrf\")");
-      if (kinds.includes("synth")) body.push("    state[\"answer\"], state[\"citations\"] = synthesis.grounded(state, ladder=globals().get(\"MODEL_LADDER\"), budget=BUDGET)");
+        body.push(`    state["chunks"] = retrieval.hybrid(state["inquiry"], k=${cfg<number>(c.config, "Retriever", "Top K")}, mode="${cfg<string>(c.config, "Retriever", "Mode")}", rrf_k=${cfg<number>(c.config, "Retriever", "RRF k")})`);
+      if (kinds.includes("synth"))
+        body.push(`    state["answer"], state["citations"] = synthesis.grounded(state, model="${cfg<string>(c.config, "Synthesizer", "Model")}", max_sentences=${cfg<number>(c.config, "Synthesizer", "Max Sentences")}, ladder=globals().get("MODEL_LADDER"), budget=BUDGET)`);
       if (kinds.includes("pii")) body.push("    tools.redact(state, entities=" + JSON.stringify(c.caseFiles.flatMap((f) => f.redact)) + ")");
       if (kinds.includes("hitm")) body.push("    state[\"approval\"] = interrupt({\"question\": \"Approve AI suggestion?\", \"lane\": state.get(\"lane\")})");
       if (!body.length) body.push(`    tools.run(${yq(s.text)}, state)`);
@@ -601,6 +603,7 @@ export function emitIR(r: CompileResult) {
         milestone: s.milestone,
         exit_gateway: s.gate ?? null,
       })),
+      config: c.config,
       deployment: c.deployment,
       actuators: c.actuators,
       satisfiable: c.satisfiable,

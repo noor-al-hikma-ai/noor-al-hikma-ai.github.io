@@ -2,6 +2,8 @@
 // drives curation, ROI guards, retrieval, synthesis and the Lean exit gateway.
 
 import { evalRule } from "../casespine/rules";
+import { cfg } from "../casespine/configSchema";
+import type { Replacement } from "./pii";
 import type { CaseAST, CompiledRule } from "../casespine/types";
 import { BM25, DenseLSA, approxTokens, curate, lexicalEntropy, rrfFuse, synthesize, tokenize, type Answer, type Chunk, type CurationReport, type Ranked } from "./engine";
 import type { ExtractedDoc } from "./extract";
@@ -21,10 +23,10 @@ export function buildIndex(docs: ExtractedDoc[], c: CaseAST): Index {
   const cf = c.caseFiles[0];
   const redact = [...new Set(c.caseFiles.flatMap((f) => f.redact))];
   const minCoherence = cf?.coherence ?? 0.7;
-  const report = curate(docs, redact, minCoherence, c.namespacePath);
+  const report = curate(docs, redact, minCoherence, c.namespacePath, cfg<number>(c.config, "Chunker", "Target Words"), cfg<string>(c.config, "PII Redactor", "Replacement") as Replacement, cfg<number>(c.config, "Chunker", "Overlap Sentences"));
   const toks = report.chunks.map((x) => x.tokens);
-  const bm25 = new BM25(toks.length ? toks : [["empty"]]);
-  const dense = new DenseLSA(toks.length ? toks : [["empty"]], 12);
+  const bm25 = new BM25(toks.length ? toks : [["empty"]], cfg<number>(c.config, "Retriever", "BM25 k1"), cfg<number>(c.config, "Retriever", "BM25 b"));
+  const dense = new DenseLSA(toks.length ? toks : [["empty"]], cfg<number>(c.config, "Retriever", "Dense Dims"));
   return { report, bm25, dense, ms: performance.now() - t0, namespace: c.namespacePath, redact, minCoherence };
 }
 
@@ -85,7 +87,8 @@ export interface RunOptions {
   lane: string;
   probes: Record<string, number | boolean>;
   injectConfounder: boolean;
-  topK: number;
+  /** Overrides Config › Retriever › Top K when set. */
+  topK?: number;
 }
 
 const flipOp: Record<string, string> = { ">=": "≥", "<=": "≤", ">": ">", "<": "<", "=": "=", "!=": "≠" };
@@ -173,14 +176,17 @@ export function runQuery(query: string, c: CaseAST, idx: Index, session: Session
 
   // 4. Retrieval: BM25 + dense SVD + RRF
   if (!trace.cached) {
-    const bm = idx.bm25.score(qt);
-    const de = idx.dense.score(qt);
-    trace.ranked = rrfFuse(idx.report.chunks, bm, de, 60, opt.topK);
+    const mode = cfg<string>(c.config, "Retriever", "Mode");
+    const topK = opt.topK ?? cfg<number>(c.config, "Retriever", "Top K");
+    const bm = mode === "dense" ? idx.report.chunks.map(() => 0) : idx.bm25.score(qt);
+    const de = mode === "bm25" ? idx.report.chunks.map(() => 0) : idx.dense.score(qt);
+    trace.ranked = rrfFuse(idx.report.chunks, bm, de, cfg<number>(c.config, "Retriever", "RRF k"), topK);
     if (opt.injectConfounder && idx.report.chunks.length) {
       const foreign: Chunk = { ...idx.report.chunks[idx.report.chunks.length - 1], namespace: "OtherCase/ConventionalRetailCards", id: -1, doc: "foreign_case_memo.pdf" };
-      trace.ranked = [...trace.ranked.slice(0, opt.topK - 1), { chunk: foreign, bm25: 0, bm25Rank: 99, dense: 0, denseRank: 99, rrf: 0 }];
+      trace.ranked = [...trace.ranked.slice(0, topK - 1), { chunk: foreign, bm25: 0, bm25Rank: 99, dense: 0, denseRank: 99, rrf: 0 }];
     }
-    steps.push({ id: "retrieve", label: "Hybrid retrieval", status: "pass", detail: `BM25 + ${idx.dense.dims}D SVD → RRF top ${trace.ranked.length}` });
+    const label = mode === "bm25" ? "BM25 only" : mode === "dense" ? `${idx.dense.dims}D SVD only` : `BM25 + ${idx.dense.dims}D SVD → RRF`;
+    steps.push({ id: "retrieve", label: "Retrieval", status: "pass", detail: `${label} · top ${trace.ranked.length}` });
   }
 
   // 5. Adaptive optimizer + model ladder
@@ -221,7 +227,7 @@ export function runQuery(query: string, c: CaseAST, idx: Index, session: Session
   });
 
   // 6. Synthesis
-  if (!trace.cached) trace.answer = synthesize(query, trace.ranked);
+  if (!trace.cached) trace.answer = synthesize(query, trace.ranked, cfg<number>(c.config, "Synthesizer", "Max Sentences"), cfg<boolean>(c.config, "Synthesizer", "Abstain When Unsupported"));
   const ans = trace.answer!;
   steps.push({
     id: "synth",
@@ -259,7 +265,8 @@ export function runQuery(query: string, c: CaseAST, idx: Index, session: Session
   }));
   const anyFalse = trace.rules.some((r) => r.verdict === false);
   const anyUnbound = trace.rules.some((r) => r.verdict === undefined);
-  trace.outcome = anyFalse ? "BREACH" : anyUnbound ? "FAIL_CLOSED" : "VERIFIED";
+  const failOpen = cfg<string>(c.config, "Exit Gateway", "Fail Mode") === "fail-open";
+  trace.outcome = anyFalse ? "BREACH" : anyUnbound && !failOpen ? "FAIL_CLOSED" : "VERIFIED";
   const lastStage = c.stages[c.stages.length - 1];
   if (trace.outcome !== "VERIFIED") trace.escalateTo = lastStage?.escalateTo ?? c.lanes.find((l) => l.roles.some((r) => /APPROVER/.test(r)))?.name ?? "Case Owner";
   steps.push({

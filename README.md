@@ -6,12 +6,29 @@ browser: there is no backend, no cookies and no analytics, and fonts are self-ho
 
 | Page | URL | What it does |
 | --- | --- | --- |
-| Paper | `#/paper` | NeurIPS-style landing page with live figures (pipeline, rule → Lean 4 compiler, ROI governor, archetypes, roles, sovereign stack, audit chain). |
-| Walkthrough | `#/walkthrough` | 13 live slides for client meetings. Arrow keys / swipe; `#/walkthrough#5` deep-links a slide; `Esc` exits. |
-| Studio | `#/studio` | CaseSpine editor (completion, hover hints, lint) beside an Orange-style visual canvas that stays in sync both ways; compiled Lean 4, Z3, LangGraph, BPMN, AWS, Google Cloud, Databricks, Kubernetes and IR outputs; `.csar` download. |
-| RAG Sandbox | `#/sandbox` | Upload PDF / DOCX / TXT / MD / HTML, ask questions; UAE PII redaction, BM25 + SVD + RRF retrieval, ROI guards, Lean exit gateway, human escalation queue and a tamper-evident SHA-256 audit ledger. |
+| Home | `#/` | Cinematic landing: hero film, four chapters of one customer's morning, the same morning for three others, specifications, the step-by-step deck and the call to action. Film slots play your clips when configured (see VIDEO_PROMPTS.md), otherwise animated scenes. |
+| How it works | `#/walkthrough` | The same story as full-screen slides with code examples; arrow keys / swipe; `#/walkthrough#5` deep-links a slide. |
+| Studio | `#/studio` | ✨ Copilot (plain English/Arabic → CaseSpine draft, assumptions, clarifying questions, rephrasing tips); editor with grey ghost-text suggestions (Tab), completion, ▾ dropdowns and hover quick-picks; Orange-style canvas with a searchable widget palette and a config form for every widget; ▶ Compile (⌘/Ctrl+Enter); Lean 4, Z3, LangGraph, BPMN, AWS, Google Cloud, Databricks, Kubernetes and IR outputs; `.csar` download. |
+| RAG Sandbox | `#/sandbox` | Ask works straight away (sample policies load automatically) or upload PDF / DOCX / TXT / MD / HTML; UAE PII redaction, BM25 + SVD + RRF retrieval, ROI guards, Lean exit gateway, "did you mean" and suggested questions, human escalation queue, tamper-evident audit ledger. Every `Config:` value in the case changes its behaviour. |
 | Services | `#/services` | Seven services, each with its own interactive widget. |
 | Trust & Compliance | `#/trust` | Regulation → control → evidence mapping for UAE banks, integrations, security posture. |
+| Technical brief | `#/brief` | The NeurIPS-style technical paper for engineers and architects. |
+
+### CaseSpine `Config:` sections
+
+Every widget is a component with typed settings (schema in `src/lib/casespine/configSchema.ts`):
+
+```
+Config:
+  Retriever: { Mode: hybrid, Top K: 3, BM25 k1: 1.2, RRF k: 60 }
+  Synthesizer: { Model: auto, Max Sentences: 3, Abstain When Unsupported: true }
+  Escalation:
+    Channel: teams
+    SLA Hours: 4
+```
+
+Values are validated (ranges, allowed options), inherited by subcases, emitted into the IR and LangGraph
+scaffold, and used by the sandbox runtime. Clicking a widget on the canvas edits the same lines.
 
 ## Run it on your Mac
 
@@ -24,14 +41,14 @@ npm run dev        # http://localhost:5173
 Other commands:
 
 ```bash
-npm test           # compiler tests: all examples compile, Arabic ≡ English, palette edits, .csar build
+npm test           # compiler tests: examples, Arabic ≡ English, 210 config round-trips, palette, ghost text, Copilot, .csar
 npm run build      # production build into dist/
 npm run preview    # serve dist/ locally, exactly as GitHub Pages will
 ```
 
 ## Edit before publishing
 
-* `src/config.ts` — contact e-mail or booking URL (used by every "Request a pilot" / "Discuss this" button), LinkedIn, the founder line.
+* `src/config.ts` — contact e-mail or booking URL (used by every "Request a pilot" / "Discuss this" button), LinkedIn, the founder line, and the landing-page film paths (`videos`).
 * `src/pages/Services.tsx` — service names, bullets and formats.
 * `src/pages/Trust.tsx` — regulatory mapping text (have your compliance adviser review it).
 * `src/lib/casespine/examples.ts` — the example programs shown in the Studio.

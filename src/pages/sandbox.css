@@ -80,3 +80,8 @@
 .sb-ledger li { padding: 5px 0; border-bottom: 1px solid var(--rule); }
 .sb-ledger li.bad { background: var(--danger-soft); }
 .sb-hash { font-size: 10.5px; color: var(--ink-3); }
+.sb-suggest { background: var(--gold-soft); border: 1px solid var(--gold-2); border-radius: 10px; padding: 9px 12px; margin-bottom: 10px; font-size: 13.5px; display: flex; flex-direction: column; gap: 6px; }
+.sb-sugs, .sb-related { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; align-items: center; }
+.sb-related { margin: 4px 0 8px; font-size: 12.5px; }
+.sb-sug { border: 1px solid var(--rule-2); background: var(--card); border-radius: 99px; padding: 3px 10px; font-size: 12.5px; cursor: pointer; color: var(--cobalt-2); font-family: var(--sans); }
+.sb-sug:hover { border-color: var(--cobalt); background: var(--cobalt-soft); }

@@ -8,7 +8,10 @@ import { buildIndex, newSession, runQuery, TIERS, type Index, type RunTrace, typ
 import { SAMPLE_DOCS, SAMPLE_QUESTIONS } from "../lib/rag/samples";
 import { append, toProvJsonLd, verify, type LedgerEntry } from "../lib/ledger";
 import { sha256Hex } from "../lib/sha256";
-import { useSpec } from "../store";
+import { getSpec, setSpec, useSpec } from "../store";
+import { setConfig } from "../lib/casespine/edits";
+import { cfg } from "../lib/casespine/configSchema";
+import { correctSpelling, relatedQuestions } from "../lib/rag/rephrase";
 import "./sandbox.css";
 
 interface Escalation {
@@ -63,7 +66,7 @@ export default function Sandbox() {
   const [tampered, setTampered] = useState<LedgerEntry[] | null>(null);
   const [escalations, setEscalations] = useState<Escalation[]>([]);
   const [inject, setInject] = useState(false);
-  const [topK, setTopK] = useState(3);
+  const [pending, setPending] = useState<string | null>(null);
   const [budget, setBudget] = useState(0.05);
   const [probes, setProbes] = useState<Record<string, number | boolean>>({});
   const [run, setRun] = useState<CanvasRun | null>(null);
@@ -72,12 +75,24 @@ export default function Sandbox() {
   const session = useRef<SessionState>(newSession(budget));
   const [, force] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
+  const resultRef = useRef<HTMLDivElement>(null);
 
   const lanes = c?.lanes ?? [];
   const agent = lane || lanes[0]?.name || "Case Owner";
   const sso = lanes.find((l) => l.name === agent)?.sso ?? "SSO";
 
-  // Re-index when the case or corpus changes.
+  // Re-index only when the corpus or an index-relevant setting changes.
+  const indexKey = c
+    ? JSON.stringify([
+        c.namespacePath,
+        c.caseFiles.map((f) => [f.redact, f.coherence]),
+        c.config["chunker"],
+        c.config["pii redactor"],
+        c.config["retriever"]?.["bm25 k1"],
+        c.config["retriever"]?.["bm25 b"],
+        c.config["retriever"]?.["dense dims"],
+      ])
+    : "";
   useEffect(() => {
     if (!c || !docs.length) {
       setIndex(null);
@@ -104,7 +119,7 @@ export default function Sandbox() {
       setRun({ lit: nodes.filter((n) => curationKinds.includes(n.kind) || n.id === firstMs?.id).map((n) => n.id) });
     }, 30);
     return () => clearTimeout(t);
-  }, [docs, c?.namespacePath, compiled]);
+  }, [docs, indexKey]);
 
   // Compile event on case change.
   const leanHash = useMemo(() => sha256Hex(emitLean(compiled)).slice(0, 16), [compiled]);
@@ -184,8 +199,16 @@ export default function Sandbox() {
   };
 
   const ask = (q = query) => {
-    if (!c || !index) return;
-    const t = runQuery(q, c, index, session.current, { lane: agent, probes, injectConfounder: inject, topK });
+    if (!c) return;
+    if (!q.trim()) return;
+    if (!index) {
+      // No documents yet: load the sample bank policies and answer as soon as they are indexed.
+      setPending(q);
+      if (!docs.length) loadSamples();
+      return;
+    }
+    const t = runQuery(q, c, index, session.current, { lane: agent, probes, injectConfounder: inject });
+    setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 60);
     setTrace(t);
     setOpenCite(null);
     animate(t);
@@ -217,6 +240,18 @@ export default function Sandbox() {
       ]);
     }
   };
+
+  useEffect(() => {
+    if (index && pending) {
+      const q = pending;
+      setPending(null);
+      ask(q);
+    }
+  }, [index, pending]);
+
+  const corrected = trace && index ? correctSpelling(trace.query, index) : null;
+  const related = trace && index ? relatedQuestions(trace.query, index, trace) : [];
+  const topK = c ? cfg<number>(c.config, "Retriever", "Top K") : 3;
 
   const decide = (id: number, status: "approved" | "rejected") => {
     const e = escalations.find((x) => x.id === id);
@@ -344,7 +379,7 @@ export default function Sandbox() {
               <summary className="label">Runtime levers</summary>
               <label className="sb-row">
                 <span>Top-k chunks</span>
-                <input type="range" min={1} max={6} value={topK} onChange={(e) => setTopK(+e.target.value)} />
+                <input type="range" min={1} max={10} value={topK} onChange={(e) => c && setSpec(setConfig(getSpec().spec, c, "Retriever", "Top K", e.target.value))} title="Writes Config › Retriever › Top K in the case" />
                 <b>{topK}</b>
               </label>
               <label className="sb-row">
@@ -402,9 +437,9 @@ export default function Sandbox() {
                 ask();
               }}
             >
-              <input type="text" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Question" placeholder={index ? "Ask about the case file…" : "Load documents first"} />
-              <button className="btn btn-primary" disabled={!index}>
-                Ask
+              <input type="text" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Question" placeholder="Ask about the case file…" />
+              <button className="btn btn-primary" disabled={!!pending || !query.trim()}>
+                {pending ? "Loading policies…" : "Ask"}
               </button>
             </form>
             <div className="sb-samples">
@@ -412,7 +447,7 @@ export default function Sandbox() {
                 <button
                   key={q}
                   className="chip"
-                  disabled={!index}
+                  disabled={!!pending}
                   onClick={() => {
                     setQuery(q);
                     ask(q);
@@ -422,9 +457,13 @@ export default function Sandbox() {
                 </button>
               ))}
             </div>
-            {!index && <p className="muted" style={{ fontSize: 14 }}>Load the synthetic corpus or drop your own documents to begin.</p>}
+            {!index && !pending && (
+              <p className="muted" style={{ fontSize: 14 }}>
+                Just ask — we'll load sample bank policies for you. Or drop your own documents on the left.
+              </p>
+            )}
             {trace && (
-              <div className="fade-up" key={trace.query + trace.latencyMs}>
+              <div className="fade-up" key={trace.query + trace.latencyMs} ref={resultRef}>
                 <div className={`sb-outcome ${outcomeClass}`}>
                   <b>{{ VERIFIED: "✓ Verified answer", BREACH: "✕ Contract breached — halted", FAIL_CLOSED: "◐ Fail-closed — awaiting human", BLOCKED: "⊘ Blocked at 0 tokens" }[trace.outcome]}</b>
                   <span>
@@ -435,6 +474,29 @@ export default function Sandbox() {
                         : `Escalated to ${trace.escalateTo}`}
                   </span>
                 </div>
+                {(corrected || ((trace.blocked || trace.answer?.abstained) && related.length > 0)) && (
+                  <div className="sb-suggest">
+                    {corrected && (
+                      <div>
+                        Did you mean{" "}
+                        <button className="sb-sug" onClick={() => { setQuery(corrected); ask(corrected); }}>
+                          “{corrected}”
+                        </button>
+                        ?
+                      </div>
+                    )}
+                    {(trace.blocked || trace.answer?.abstained) && related.length > 0 && (
+                      <div>
+                        <span className="muted">Try asking about what these documents cover:</span>
+                        <div className="sb-sugs">
+                          {related.map((r) => (
+                            <button key={r} className="sb-sug" onClick={() => { setQuery(r); ask(r); }}>{r}</button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
                 {trace.answer && !trace.blocked && (
                   <div className="sb-answer">
                     {trace.answer.abstained ? (
@@ -461,6 +523,14 @@ export default function Sandbox() {
                         </blockquote>
                       );
                     })()}
+                    {!trace.answer.abstained && related.length > 0 && (
+                      <div className="sb-related">
+                        <span className="muted">Related:</span>
+                        {related.map((r) => (
+                          <button key={r} className="sb-sug" onClick={() => { setQuery(r); ask(r); }}>{r}</button>
+                        ))}
+                      </div>
+                    )}
                     <div className="muted" style={{ fontSize: 12 }}>
                       Extractive synthesis runs locally for this demo; in production the same gate wraps the LLM tier chosen by the optimizer.
                     </div>

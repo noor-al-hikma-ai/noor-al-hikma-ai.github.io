@@ -56,6 +56,10 @@ export const AR_KEYS: Record<string, string> = {
   "الهوية": "Identity",
   "حوكمة البيانات": "Data Governance",
   "المحركات التنفيذية": "Actuators",
+  "الإعدادات": "Config",
+  "المسترجع": "Retriever",
+  "المولد": "Synthesizer",
+  "التصعيد": "Escalation",
 };
 
 /** Phrases inside values, rules and steps (longest first is enforced below). */

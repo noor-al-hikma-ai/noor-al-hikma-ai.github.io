@@ -12,8 +12,11 @@ import { compileSpec } from "./analyze";
 import { classifyStep, KIND_META } from "./graph";
 import { clauseText } from "./rules";
 import { normKey } from "./tree";
-import { KEYWORDS, PII_ENTITIES, RULE_TEMPLATES, STEP_TEMPLATES, VALUE_SUGGESTIONS, type KeywordDoc } from "./vocab";
+import { KEYWORDS, PII_ENTITIES, RULE_TEMPLATES, STEP_TEMPLATES } from "./vocab";
 import type { CompileResult } from "./types";
+import { COMPONENTS, componentSpec, fieldSpec, formatValue, inlineDefaults } from "./configSchema";
+import { ancestorsAt, levelOf, siblingKeys, translateKey, valueOptions, type Level } from "./suggest";
+import { contextFrom, dropdowns, ghostText, rtlLines, showAllOptions } from "./assist";
 
 // ------------------------------------------------------------------ tokenizer
 interface TokState {
@@ -92,49 +95,25 @@ function lineKey(text: string): { indent: number; key: string } | null {
   return { indent: m[1].length, key: m[2].trim() };
 }
 
-function ancestors(state: EditorState, lineNo: number, indent: number): string[] {
-  const out: string[] = [];
-  let cur = indent;
-  for (let n = lineNo - 1; n >= 1 && cur > 0; n--) {
-    const text = state.doc.line(n).text;
-    if (!text.trim() || /^\s*#/.test(text)) continue;
-    const ind = text.length - text.trimStart().length;
-    if (ind < cur) {
-      const k = lineKey(text);
-      out.push(k ? normKey(translateKey(k.key)) : normKey(text.trim().replace(/^-\s*/, "")));
-      cur = ind;
-    }
+function docLines(state: EditorState) {
+  return state.doc.toString().split("\n");
+}
+
+function keyCompletions(level: Level, anc: string[], ar: boolean): Completion[] {
+  if (level === "config")
+    return COMPONENTS.map((c) => ({ label: c.name, apply: `${c.name}: ${inlineDefaults(c)}`, type: "class", detail: "component config", info: c.doc, boost: 1 }));
+  if (level === "config-fields") {
+    const spec = componentSpec(anc[0]);
+    return (spec?.fields ?? []).map((f) => ({
+      label: f.key,
+      apply: `${f.key}: ${f.type === "lane" ? "" : formatValue(f.default)}`,
+      type: "property",
+      detail: f.type === "number" ? `${f.min}–${f.max}` : f.options ? f.options.join(" | ") : f.type,
+      info: f.doc,
+    }));
   }
-  return out;
-}
-
-const AR_TO_EN = new Map(KEYWORDS.filter((k) => k.ar).map((k) => [k.ar!, k.key]));
-function translateKey(k: string) {
-  return AR_TO_EN.get(k) ?? k;
-}
-
-function levelFor(anc: string[]): KeywordDoc["level"] | "rules" | "steps" | "lane-name" | "cf-name" | null {
-  const p = anc[0] ?? "";
-  const gp = anc[1] ?? "";
-  if (!anc.length) return "top";
-  if (p.startsWith("rules")) return "rules";
-  if (p === "steps") return "steps";
-  if (p === "binding lean contract") return "contract";
-  if (p === "cost & traffic guards") return "guards";
-  if (p.startsWith("exit gateway")) return "gateway";
-  if (p === "deployment") return "deployment";
-  if (/^stage \d+/.test(p)) return "stage";
-  if (p === "on breach") return "stage";
-  if (gp === "lanes") return "lane";
-  if (gp === "case file") return "case-file";
-  if (p === "lanes") return "lane-name";
-  if (p === "case file") return "cf-name";
-  if (/^subcase\b/.test(p)) return "top";
-  return null;
-}
-
-function keyCompletions(level: string, ar: boolean): Completion[] {
-  return KEYWORDS.filter((k) => k.level === level).map((k) => ({
+  const lv = level === "top" ? "top" : level === "case-file" ? "case-file" : level;
+  return KEYWORDS.filter((k) => k.level === lv).map((k) => ({
     label: ar && k.ar ? k.ar : k.key,
     apply: (ar && k.ar ? k.ar : k.key) + ": ",
     type: "keyword",
@@ -145,80 +124,61 @@ function keyCompletions(level: string, ar: boolean): Completion[] {
 }
 
 function caseSpineCompletions(ctx: CompletionContext): CompletionResult | null {
+  const showAll = showAllOptions.next;
+  showAllOptions.next = false;
   const line = ctx.state.doc.lineAt(ctx.pos);
   const before = line.text.slice(0, ctx.pos - line.from);
   const indent = before.length - before.trimStart().length;
   const res = compiledFor(ctx.state);
+  const sctx = contextFrom(res);
   const ar = res.language === "ar";
-  const anc = ancestors(ctx.state, line.number, indent);
-  const level = levelFor(anc);
-  const milestones = [...new Set(res.cases.flatMap((c) => c.stages.map((s) => s.milestone)))];
-  const lanes = [...new Set(res.cases.flatMap((c) => c.lanes.map((l) => l.name)))];
+  const anc = ancestorsAt(docLines(ctx.state), line.number - 1, indent);
+  const level = levelOf(anc);
 
   // Milestone names anywhere after "Milestone "
   const msm = /(Milestone|المعلم)\s+(\w*)$/.exec(before);
   if (msm) {
     return {
       from: ctx.pos - msm[2].length,
-      options: [...milestones, "IndexReady", "InquiryResolved", "ReleaseApproved"]
-        .filter((v, i, a) => a.indexOf(v) === i)
-        .map((m) => ({ label: m, type: "constant", detail: milestones.includes(m) ? "reached in this case" : "new" })),
+      options: [...new Set([...sctx.milestones, "IndexReady", "InquiryResolved", "CaseResolved"])].map((m) => ({ label: m, type: "constant", detail: sctx.milestones.includes(m) ? "reached in this case" : "new" })),
     };
   }
   // PII entities inside [ ... ] after redact / PII phrases
   const ent = /(redact|Scrub|for|حجب)\s*\[([^\]]*?)(\w*)$/i.exec(before);
-  if (ent) {
-    return { from: ctx.pos - ent[3].length, options: PII_ENTITIES.map((e) => ({ label: e, type: "enum", detail: "PII entity" })) };
-  }
+  if (ent) return { from: ctx.pos - ent[3].length, options: PII_ENTITIES.map((e) => ({ label: e, type: "enum", detail: "PII entity" })) };
+
   // Value position: "Key: value"
   const kv = /^\s*(?:-\s+)?([^:"'[{#\s][^:]*?):\s+(.*)$/.exec(before);
-  if (kv && !(level === "rules" || level === "steps")) {
-    const key = normKey(translateKey(kv[1].trim()));
+  if (kv && level !== "rules" && level !== "steps") {
     const typed = kv[2];
-    if (key === "escalate to")
-      return { from: ctx.pos - typed.length, options: lanes.map((l) => ({ label: l, type: "variable", detail: "Lane" })) };
-    if (key === "reach milestone")
-      return { from: ctx.pos - typed.length, options: milestones.map((l) => ({ label: l, type: "constant" })) };
-    const sugg = VALUE_SUGGESTIONS[key];
-    if (sugg) return { from: ctx.pos - typed.length, options: sugg.map((s) => ({ label: s, type: "text" })), filter: true };
-    return null;
+    const opts = valueOptions(kv[1], anc, sctx);
+    if (!opts.length) return null;
+    return {
+      from: ctx.pos - typed.length,
+      options: opts.map((o, i) => ({ label: o, type: "text", boost: -i, detail: i === 0 ? "suggested" : undefined })),
+      filter: !showAll,
+    };
   }
   // Start of an item / key
   const head = /^\s*(-\s+)?([^:]*)$/.exec(before);
   if (!head) return null;
-  if (!ctx.explicit && head[2].length === 0 && !head[1]) return null;
+  if (!ctx.explicit && !showAll && head[2].length === 0 && !head[1]) return null;
   const from = ctx.pos - head[2].length;
   if (level === "rules") {
-    const ms = milestones[milestones.length - 1] ?? "InquiryResolved";
+    const ms = sctx.milestones[sctx.milestones.length - 1] ?? "InquiryResolved";
     return {
       from,
       options: RULE_TEMPLATES.map((r) =>
-        snippetCompletion(r.text.replace("${Milestone}", "${" + ms + "}"), {
-          label: r.label,
-          detail: r.detail,
-          type: "function",
-          info: "SBVR rule → Lean 4 proposition",
-        }),
+        snippetCompletion(r.text.replace("${Milestone}", "${" + ms + "}"), { label: r.label, detail: r.detail, type: "function", info: "SBVR rule → Lean 4 proposition" }),
       ),
       filter: true,
     };
   }
   if (level === "steps") {
-    return { from, options: STEP_TEMPLATES.map((s) => ({ label: s, type: "method", detail: classifyStep(s).map((k) => KIND_META[k.kind].engine).join(" ") })) };
+    return { from, options: STEP_TEMPLATES.map((st) => ({ label: st, type: "method", detail: classifyStep(st).map((k) => KIND_META[k.kind].engine).join(" ") })) };
   }
-  if (level === "lane-name" || level === "cf-name") return null;
-  if (!level) return null;
-  const opts = keyCompletions(level, ar);
-  if (level === "top" && anc.length === 0) {
-    opts.push(
-      snippetCompletion("- Stage ${1} (${Name}):\n      When: ${trigger}\n      Steps:\n        - ${step}\n      Reach Milestone: ${Milestone}", {
-        label: "Stage (template)",
-        type: "class",
-        detail: "BPMN SubProcess",
-      }),
-    );
-  }
-  if (anc[0] === "process flow") {
+  if (level === "lane-name" || level === "cf-name" || level === "other") return null;
+  if (level === "process") {
     return {
       from,
       options: [
@@ -226,13 +186,33 @@ function caseSpineCompletions(ctx: CompletionContext): CompletionResult | null {
       ],
     };
   }
-  return { from, options: opts, validFor: /^[\w &()؀-ۿ-]*$/ };
+  const opts = keyCompletions(level, anc, ar);
+  return { from, options: opts, validFor: /^[\w &()\u0600-\u06FF-]*$/ };
 }
 
 // ------------------------------------------------------------------ hover
+function pickList(view: EditorView, options: string[], from: number, to: number, current: string): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "cs-pick";
+  for (const o of options.slice(0, 12)) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = o;
+    if (o === current) b.className = "on";
+    b.onmousedown = (e) => {
+      e.preventDefault();
+      view.dispatch({ changes: { from, to, insert: o }, userEvent: "input.pick" });
+      view.focus();
+    };
+    wrap.appendChild(b);
+  }
+  return wrap;
+}
+
 const hover = hoverTooltip((view, pos) => {
   const line = view.state.doc.lineAt(pos);
   const res = compiledFor(view.state);
+  const sctx = contextFrom(res);
   const dom = document.createElement("div");
   dom.className = "cs-hover";
   const k = lineKey(line.text);
@@ -254,19 +234,69 @@ const hover = hoverTooltip((view, pos) => {
       kinds.map((x) => `<div class="cs-hover-row"><b>${KIND_META[x.kind].label}</b> <code>${KIND_META[x.kind].engine}</code><br><span>${KIND_META[x.kind].doc}</span></div>`).join("");
     return { pos: line.from, end: line.to, above: true, create: () => ({ dom }) };
   }
-  if (k) {
-    const keyStart = line.from + k.indent + (line.text.trimStart().startsWith("-") ? 2 : 0);
-    if (pos > keyStart + k.key.length + 1) return null;
-    const en = translateKey(k.key);
-    const doc = KEYWORDS.find((d) => normKey(d.key) === normKey(en));
-    if (!doc) return null;
+  if (!k) return null;
+  const dash = line.text.trimStart().startsWith("-") ? 2 : 0;
+  const keyStart = line.from + k.indent + dash;
+  const keyEnd = keyStart + k.key.length;
+  const anc = ancestorsAt(docLines(view.state), line.number - 1, k.indent);
+  const level = levelOf(anc);
+  const valueStart = line.text.indexOf(":", k.indent + dash) + 1;
+  const rawValue = line.text.slice(valueStart).trim();
+  // Hover on the value: alternatives you can click (Visual Studio quick-pick).
+  if (pos > keyEnd && rawValue && !rawValue.startsWith("{")) {
+    const opts = valueOptions(k.key, anc, sctx);
+    if (opts.length < 2) return null;
+    const from = line.from + valueStart + (line.text.slice(valueStart).length - line.text.slice(valueStart).trimStart().length);
+    const fs = level === "config-fields" ? fieldSpec(anc[0], k.key) : undefined;
+    const head = document.createElement("div");
+    head.className = "cs-hover-k";
+    head.innerHTML = `<b>${escapeHtml(k.key)}</b> · click an alternative${fs ? ` · ${escapeHtml(fs.doc)}` : ""}`;
+    dom.appendChild(head);
+    dom.appendChild(pickList(view, opts, from, line.to, rawValue));
+    return { pos: from, end: line.to, above: true, create: () => ({ dom }) };
+  }
+  if (pos > keyEnd + 1) return null;
+  const en = translateKey(k.key);
+  const doc = KEYWORDS.find((d) => normKey(d.key) === normKey(en));
+  const comp = level === "config" ? componentSpec(k.key) : undefined;
+  const fs = level === "config-fields" ? fieldSpec(anc[0], k.key) : undefined;
+  if (doc) {
     dom.innerHTML =
       `<div class="cs-hover-k"><b>${escapeHtml(doc.key)}</b>${doc.ar ? ` · <span lang="ar">${doc.ar}</span>` : ""}</div>` +
       (doc.std ? `<div class="cs-hover-std">${escapeHtml(doc.std)}</div>` : "") +
       `<div>${escapeHtml(doc.doc)}</div>`;
-    return { pos: keyStart, end: keyStart + k.key.length, above: true, create: () => ({ dom }) };
+  } else if (comp) {
+    dom.innerHTML = `<div class="cs-hover-k"><b>${escapeHtml(comp.name)}</b> · component</div><div>${escapeHtml(comp.doc)}</div><div class="cs-hover-sub">Fields: ${comp.fields.map((f) => `<code>${escapeHtml(f.key)}</code>`).join(" ")}</div>`;
+  } else if (fs) {
+    dom.innerHTML = `<div class="cs-hover-k"><b>${escapeHtml(fs.key)}</b> · ${fs.type}${fs.type === "number" ? ` ${fs.min}–${fs.max}` : ""} · default <code>${escapeHtml(formatValue(fs.default))}</code></div><div>${escapeHtml(fs.doc)}</div>`;
+  } else return null;
+  // Other keys that fit here — click to add one below.
+  const present = siblingKeys(docLines(view.state), line.number - 1, k.indent);
+  const siblings = (level === "config" ? COMPONENTS.map((c) => c.name) : level === "config-fields" ? componentSpec(anc[0])?.fields.map((f) => f.key) ?? [] : KEYWORDS.filter((x) => x.level === (doc?.level ?? "")).map((x) => x.key))
+    .filter((x) => !present.has(normKey(x)) && normKey(x) !== normKey(en));
+  if (siblings.length) {
+    const lab = document.createElement("div");
+    lab.className = "cs-hover-sub";
+    lab.textContent = "Also available here — click to add:";
+    dom.appendChild(lab);
+    const wrap = document.createElement("div");
+    wrap.className = "cs-pick";
+    for (const sib of siblings.slice(0, 10)) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = sib;
+      b.onmousedown = (e) => {
+        e.preventDefault();
+        const ind = " ".repeat(k.indent) + (dash ? "- " : "");
+        const val = level === "config" ? inlineDefaults(componentSpec(sib)!) : valueOptions(sib, anc, sctx)[0] ?? "";
+        view.dispatch({ changes: { from: line.to, insert: `\n${ind}${sib}: ${val}` }, selection: { anchor: line.to + 1 + ind.length + sib.length + 2 + val.length } });
+        view.focus();
+      };
+      wrap.appendChild(b);
+    }
+    dom.appendChild(wrap);
   }
-  return null;
+  return { pos: keyStart, end: keyEnd, above: true, create: () => ({ dom }) };
 });
 
 function escapeHtml(s: string) {
@@ -297,6 +327,9 @@ export function caseSpineLanguage(): Extension[] {
     hover,
     lint,
     lintGutter(),
+    ...ghostText(compiledFor),
+    dropdowns(compiledFor),
+    rtlLines(),
     EditorView.perLineTextDirection.of(true),
   ];
 }

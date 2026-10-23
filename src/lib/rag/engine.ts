@@ -3,11 +3,11 @@
 // Reciprocal Rank Fusion and extractive, citation-grounded synthesis.
 // Deterministic and dependency-free so every step can be audited.
 
-import { redactPII } from "./pii";
+import { redactPII, type Replacement } from "./pii";
 import type { ExtractedDoc } from "./extract";
 
 // ------------------------------------------------------------- text utils
-const STOP = new Set(
+export const STOP = new Set(
   (
     "a an the and or of to in on for with by from at as is are was were be been being it its this that these those " +
     "which who whom what when where why how not no can may must shall should will would do does did has have had " +
@@ -96,9 +96,13 @@ export interface CurationReport {
   piiRedacted: Record<string, number>;
   piiLeftInPlace: Record<string, number>;
   pages: number;
+  headings: { doc: string; text: string }[];
+  vocab: Map<string, number>;
 }
 
-export function curate(docs: ExtractedDoc[], redactList: string[], minCoherence: number, namespace: string, targetWords = 110): CurationReport {
+export function curate(docs: ExtractedDoc[], redactList: string[], minCoherence: number, namespace: string, targetWords = 110, piiMode: Replacement = "token", overlap = 1): CurationReport {
+  const headings: { doc: string; text: string }[] = [];
+  const vocab = new Map<string, number>();
   const chunks: Chunk[] = [];
   const quarantined: Chunk[] = [];
   const piiFound: Record<string, number> = {};
@@ -109,7 +113,8 @@ export function curate(docs: ExtractedDoc[], redactList: string[], minCoherence:
   docs.forEach((doc, docIdx) => {
     for (const page of doc.pages) {
       pages++;
-      const rep = redactPII(page.text, redactList, counters);
+      const rep = redactPII(page.text, redactList, counters, piiMode);
+      for (const w of rep.text.toLowerCase().match(/[\p{L}][\p{L}-]{2,}/gu) ?? []) vocab.set(w, (vocab.get(w) ?? 0) + 1);
       for (const [k, v] of Object.entries(rep.found)) piiFound[k] = (piiFound[k] ?? 0) + v;
       for (const [k, v] of Object.entries(rep.redacted)) piiRedacted[k] = (piiRedacted[k] ?? 0) + v;
       // Markdown / numbered headings become their own paragraph.
@@ -125,11 +130,12 @@ export function curate(docs: ExtractedDoc[], redactList: string[], minCoherence:
         const c: Chunk = { id: id++, doc: doc.name, docIdx, page: page.num, text, tokens: tokenize(text), coherence: coherenceScore(text), namespace };
         (c.coherence >= minCoherence && c.tokens.length >= 4 ? chunks : quarantined).push(c);
         // 1-sentence overlap keeps context across chunk boundaries.
-        buf = buf.length > 1 ? [buf[buf.length - 1]] : [];
+        buf = overlap > 0 && buf.length > overlap ? buf.slice(-overlap) : [];
         words = buf.join(" ").split(/\s+/).length;
       };
       for (const p of paras) {
         const heading = p.length < 90 && !/[.!?]$/.test(p) ? p.replace(/^#+\s*/, "") + ":" : null;
+        if (heading && !/synthetic sample|^demo bank/i.test(heading)) headings.push({ doc: doc.name, text: heading.replace(/^\d+[.)]\s*/, "").replace(/:$/, "") });
         const sents = heading ? [heading] : splitSentences(p);
         for (const s of sents) {
           buf.push(s);
@@ -144,7 +150,7 @@ export function curate(docs: ExtractedDoc[], redactList: string[], minCoherence:
   });
   const piiLeftInPlace: Record<string, number> = {};
   for (const [k, v] of Object.entries(piiFound)) if ((piiRedacted[k] ?? 0) < v) piiLeftInPlace[k] = v - (piiRedacted[k] ?? 0);
-  return { chunks, quarantined, piiFound, piiRedacted, piiLeftInPlace, pages };
+  return { chunks, quarantined, piiFound, piiRedacted, piiLeftInPlace, pages, headings, vocab };
 }
 
 // ------------------------------------------------------------- BM25
@@ -405,7 +411,7 @@ export interface Answer {
   coverage: number;
 }
 
-export function synthesize(question: string, ranked: Ranked[], maxSentences = 3): Answer {
+export function synthesize(question: string, ranked: Ranked[], maxSentences = 3, abstain = true): Answer {
   const qt = new Set(tokenize(question));
   const cands: { text: string; cite: number; score: number; order: number }[] = [];
   ranked.forEach((r, ri) => {
@@ -417,6 +423,12 @@ export function synthesize(question: string, ranked: Ranked[], maxSentences = 3)
       if (overlap > 0) cands.push({ text: s, cite: ri, score, order: ri * 100 + si });
     });
   });
+  if (!cands.length && !abstain && ranked.length) {
+    splitSentences(ranked[0].chunk.text)
+      .filter((x) => !/:$/.test(x))
+      .slice(0, maxSentences)
+      .forEach((x, si) => cands.push({ text: x, cite: 0, score: 0.1, order: si }));
+  }
   cands.sort((a, b) => b.score - a.score);
   const best = cands[0]?.score ?? 0;
   const chosen: typeof cands = [];

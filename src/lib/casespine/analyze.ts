@@ -4,6 +4,7 @@
 import { sha256Hex } from "../sha256";
 import { hasArabic, normalizeArabic } from "./arabic";
 import { compileRule } from "./rules";
+import { componentSpec, fieldSpec, normName, parseInlineMap, validateField } from "./configSchema";
 import { buildTree, normKey, parseList, unquote, type SpecNode } from "./tree";
 import type { CaseAST, CaseFile, Clause, CompileResult, CompiledRule, Diagnostic, Guards, Lane, Stage } from "./types";
 
@@ -11,7 +12,7 @@ const KNOWN_KEYS = new Set([
   "case", "subcase", "version", "standards", "solution archetype", "business deliverable", "engine", "engines",
   "population segment", "lanes", "case file", "binding lean contract", "cost & traffic guards", "budget ceiling",
   "process flow", "subcases", "actuators", "deployment", "business & product constraints", "ai smart suggestions",
-  "rollout strategy", "degradation fallback",
+  "rollout strategy", "degradation fallback", "config",
 ]);
 
 export const ARCHETYPES = [
@@ -239,6 +240,8 @@ function analyzeCase(
     actuators: parent ? { ...parent.actuators } : {},
     deployment: parent ? { ...parent.deployment } : {},
     constraints: [],
+    config: parent ? Object.fromEntries(Object.entries(parent.config).map(([k, v]) => [k, { ...v }])) : {},
+    configLines: {},
     subcases: [],
     depth: parent ? parent.depth + 1 : 0,
     parentPath: parent?.namespacePath,
@@ -336,6 +339,31 @@ function analyzeCase(
         break;
       case "deployment":
         for (const c of n.children) if (c.key) node.deployment[c.key] = c.value ?? "";
+        break;
+      case "config":
+        node.configLine = n.line;
+        for (const comp of n.children) {
+          if (!comp.key) continue;
+          const cname = normName(comp.key);
+          const spec = componentSpec(comp.key);
+          const pairs: [string, string][] = (comp.value ?? "").trim().startsWith("{")
+            ? parseInlineMap(comp.value ?? "")
+            : comp.children.filter((f) => f.key).map((f) => [f.key!, f.value ?? ""] as [string, string]);
+          node.config[cname] = { ...(node.config[cname] ?? {}) };
+          node.configLines[cname] = comp.line;
+          if (!spec)
+            diags.push({ line: comp.line, severity: "info", message: `"${comp.key}" is a custom component; its config is kept in the IR for your own tools.` });
+          for (const [k, v] of pairs) {
+            node.config[cname][normName(k)] = v.trim();
+            if (!spec) continue;
+            const fs = fieldSpec(comp.key, k);
+            if (!fs) diags.push({ line: comp.line, severity: "warning", message: `${spec.name} has no field "${k}". Available: ${spec.fields.map((f) => f.key).join(", ")}.` });
+            else {
+              const err = validateField(fs, v);
+              if (err) diags.push({ line: comp.line, severity: "warning", message: err });
+            }
+          }
+        }
         break;
       case "business & product constraints":
         for (const c of n.children) node.constraints.push({ facet: c.key ?? "Constraint", text: c.value ?? c.text, line: c.line });

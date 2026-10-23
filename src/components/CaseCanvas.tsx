@@ -5,18 +5,9 @@ import "d3-transition";
 import { CATEGORY_COLOR, KIND_META, deriveGraph, layoutGraph, type Category, type GNode } from "../lib/casespine/graph";
 import { PALETTE, type PaletteItem } from "../lib/casespine/edits";
 import type { CaseAST } from "../lib/casespine/types";
+import { ConfigInspector } from "./ConfigInspector";
 import "./canvas.css";
 
-const CLOUD_MAP: Record<Category, string> = {
-  data: "S3 · ADLS Gen2 · GCS · Unity Catalog Volumes · SharePoint",
-  curate: "Lambda / Azure Functions / Cloud Run · Presidio · Purview & Collibra classification",
-  govern: "Bedrock Guardrails · API Gateway usage plans · Azure APIM · KEDA",
-  retrieve: "OpenSearch · Azure AI Search · Vertex Vector Search · Databricks Vector Search",
-  reason: "Bedrock AgentCore · Azure AI Foundry · Vertex Agent Engine · Mosaic AI · vLLM on-prem",
-  verify: "Lean 4 reference monitor on Lambda / Cloud Run / Model Serving",
-  act: "Step Functions · Cloud Workflows · Lakeflow Jobs · Temporal",
-  human: "waitForTaskToken · Workflows callbacks · Teams / Slack / e-mail approvals",
-};
 
 export interface CanvasRun {
   /** Node ids lit so far, in execution order. */
@@ -31,6 +22,8 @@ interface Props {
   highlightLines?: number[];
   onSelectLines?: (lines: number[]) => void;
   onEdit?: (fn: (src: string, c: CaseAST) => string) => void;
+  /** Palette insertions (label for feedback); falls back to onEdit. */
+  onPalette?: (label: string, fn: (src: string, c: CaseAST) => string) => void;
   onRemove?: (range: [number, number]) => void;
   run?: CanvasRun | null;
   height?: number | string;
@@ -53,7 +46,7 @@ function edgePath(a: { x: number; y: number }, b: { x: number; y: number }) {
   return `M${x1},${a.y} C${x1 + dx},${a.y} ${x2 - dx},${b.y} ${x2},${b.y}`;
 }
 
-export function CaseCanvas({ ast, editable, highlightLines, onSelectLines, onEdit, onRemove, run, height = 460, compact }: Props) {
+export function CaseCanvas({ ast, editable, highlightLines, onSelectLines, onEdit, onPalette, onRemove, run, height = 460, compact }: Props) {
   const graph = useMemo(() => deriveGraph(ast), [ast]);
   const [width, setWidth] = useState(800);
   const colW = compact ? 118 : 132;
@@ -182,23 +175,39 @@ export function CaseCanvas({ ast, editable, highlightLines, onSelectLines, onEdi
   };
 
   const sel = graph.nodes.find((n) => n.id === selected) ?? null;
+  const [q, setQ] = useState("");
   const groups = useMemo(() => {
     const m = new Map<string, PaletteItem[]>();
+    const ql = q.trim().toLowerCase();
     for (const p of PALETTE) {
       if (p.present?.(ast)) continue;
+      if (ql && !`${p.label} ${p.hint} ${p.group}`.toLowerCase().includes(ql)) continue;
       if (!m.has(p.group)) m.set(p.group, []);
       m.get(p.group)!.push(p);
     }
     return [...m.entries()];
-  }, [ast]);
+  }, [ast, q]);
 
-  const applyPalette = (p: PaletteItem) => onEdit?.(p.apply);
+  const applyPalette = (p: PaletteItem) => (onPalette ? onPalette(p.label, p.apply) : onEdit?.(p.apply));
 
   return (
     <div className={`cv-wrap${editable ? " cv-editable" : ""}`} style={{ height }}>
       {editable && (
         <aside className="cv-palette" aria-label="Widget palette">
-          <div className="label" style={{ padding: "2px 4px 6px" }}>Widgets</div>
+          <input
+            className="cv-search"
+            type="search"
+            placeholder="Find a widget…"
+            value={q}
+            aria-label="Find a widget"
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && groups[0]?.[1][0]) {
+                applyPalette(groups[0][1][0]);
+                setQ("");
+              }
+            }}
+          />
           {groups.map(([g, items]) => (
             <div key={g} className="cv-pgroup">
               <div className="cv-pgroup-title">{g}</div>
@@ -222,7 +231,7 @@ export function CaseCanvas({ ast, editable, highlightLines, onSelectLines, onEdi
               })}
             </div>
           ))}
-          {!groups.length && <div className="muted" style={{ fontSize: 12 }}>All levers present.</div>}
+          {!groups.length && <div className="muted" style={{ fontSize: 12, padding: 4 }}>{q ? "No widget matches." : "Every widget is already in this case."}</div>}
         </aside>
       )}
       <div
@@ -339,33 +348,17 @@ export function CaseCanvas({ ast, editable, highlightLines, onSelectLines, onEdi
           </div>
         )}
         {sel && (
-          <div className="cv-inspector fade-up" role="dialog" aria-label={`${sel.label} details`}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span className="cv-pdot" style={{ borderColor: CATEGORY_COLOR[KIND_META[sel.kind].category], color: CATEGORY_COLOR[KIND_META[sel.kind].category] }}>
-                {KIND_META[sel.kind].glyph}
-              </span>
-              <b style={{ fontSize: 14 }}>{sel.label}</b>
-              <button className="cv-x" onClick={() => setSelected(null)} aria-label="Close">×</button>
-            </div>
-            {sel.sub && <div className="mono" style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 2 }}>{sel.sub}</div>}
-            <p>{KIND_META[sel.kind].doc}</p>
-            <div className="cv-kv"><span>Engine</span><code>{KIND_META[sel.kind].engine}</code></div>
-            <div className="cv-kv"><span>Cloud</span><span>{CLOUD_MAP[KIND_META[sel.kind].category]}</span></div>
-            {sel.lines.length > 0 && <div className="cv-kv"><span>Source</span><span>line {[...new Set(sel.lines)].sort((a, b) => a - b).join(", ")}</span></div>}
-            {editable && sel.removeRange && (
-              <button
-                className="btn btn-ghost btn-sm"
-                style={{ marginTop: 8, color: "var(--danger)" }}
-                onClick={() => {
-                  onRemove?.(sel.removeRange!);
-                  setSelected(null);
-                }}
-              >
-                Remove from case (deletes line{sel.removeRange[0] === sel.removeRange[1] ? "" : "s"} {sel.removeRange[0]}
-                {sel.removeRange[0] === sel.removeRange[1] ? "" : "–" + sel.removeRange[1]})
-              </button>
-            )}
-          </div>
+          <ConfigInspector
+            node={sel}
+            ast={ast}
+            editable={!!editable}
+            onEdit={onEdit}
+            onRemove={(range) => {
+              onRemove?.(range);
+              setSelected(null);
+            }}
+            onClose={() => setSelected(null)}
+          />
         )}
       </div>
     </div>

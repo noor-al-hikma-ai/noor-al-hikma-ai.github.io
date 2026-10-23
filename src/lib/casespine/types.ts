@@ -140,6 +140,11 @@ export interface CaseAST {
   actuators: Record<string, string>;
   deployment: Record<string, string>;
   constraints: { facet: string; text: string; line: number }[];
+  /** Component configuration: normalised component -> normalised field -> raw value. */
+  config: Record<string, Record<string, string>>;
+  /** Where each component's config lives (line of its entry), for editors. */
+  configLines: Record<string, number>;
+  configLine?: number;
   subcases: CaseAST[];
   depth: number;
   parentPath?: string;

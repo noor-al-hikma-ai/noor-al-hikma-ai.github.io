@@ -13,6 +13,16 @@ export const SITE = {
   contactEmail: "",
   linkedin: "",
   github: "",
+  // Landing-page films. Put files in public/videos/ (e.g. dawn.webm + dawn.mp4 + dawn.jpg)
+  // and set the base path here, e.g. dawn: "videos/dawn". Empty = animated stand-in.
+  // See VIDEO_PROMPTS.md for the shot list and generation prompts.
+  videos: {
+    dawn: "",
+    ask: "",
+    checks: "",
+    answer: "",
+    life: "",
+  } as Record<"dawn" | "ask" | "checks" | "answer" | "life", string>,
 };
 
 export function contactHref(subject = "CaseSpine pilot"): string {

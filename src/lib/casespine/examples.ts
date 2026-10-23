@@ -40,6 +40,16 @@ Cost & Traffic Guards:
   Value Per Outcome: $3.50 per resolved inquiry
   Target ROI: 4.0x
 
+# Every widget is configurable — inline { … } or as a block.
+Config:
+  Retriever: { Mode: hybrid, Top K: 3, BM25 k1: 1.2, RRF k: 60 }
+  Synthesizer: { Model: auto, Max Sentences: 3, Abstain When Unsupported: true }
+  PII Redactor: { Replacement: token }
+  Exit Gateway: { Fail Mode: fail-closed, Log Proofs: true }
+  Escalation:
+    Channel: teams
+    SLA Hours: 4
+
 Process Flow:
   - Stage 1 (Curate Case File via LangGraph):
       When: Case File "Wire Transfer Policies" is loaded
@@ -105,6 +115,10 @@ export const RETAIL_WIRE_AR = `# CaseSpine v5 — نفس البرنامج بال
   حد المعدل: 30 طلب/دقيقة لكل مسار
   المواضيع المحظورة: [investment advice, cryptocurrency speculation]
   سلم النماذج: [large, medium, small] عند بقاء الميزانية < 40%
+
+الإعدادات:
+  المسترجع: { Mode: hybrid, Top K: 3 }
+  المولد: { Max Sentences: 3, Language: ar }
 
 مسار العملية:
   - المرحلة 1 (تنقيح ملف الحالة):
