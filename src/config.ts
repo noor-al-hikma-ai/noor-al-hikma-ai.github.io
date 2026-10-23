@@ -10,7 +10,7 @@ export const SITE = {
   // Where "Request a pilot" / "Book a call" buttons go. Use a mailto: or a booking URL.
   // Leave empty to point buttons at the Services page contact block instead.
   contactUrl: "",
-  contactEmail: "",
+  contactEmail: "olddaos@gmail.com",
   linkedin: "",
   github: "",
   // Landing-page films. Put files in public/videos/ (e.g. dawn.webm + dawn.mp4 + dawn.jpg)

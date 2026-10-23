@@ -145,7 +145,7 @@ example : ProcessContract witness := by decide`} />
       <div className="sd-cta">
         <a className="btn btn-gold" href="#/studio">✨ Describe your case</a>
         <a className="btn btn-emerald" href="#/sandbox">Ask your documents</a>
-        <a className="btn btn-primary" href={contactHref("Noor Al Hikma AI — pilot")}>Book a 20-minute demo</a>
+        <a className="btn btn-primary" href={contactHref("Noor Al Hikma AI — demo")}>Book a 20-minute demo</a>
       </div>
     ),
   },
