@@ -2,9 +2,9 @@
 // (keywords, SBVR rule templates, lanes, milestones, SSO / cloud / governance
 // values), hover hints showing the compiled Lean 4 for each rule, and linting.
 
-import { StreamLanguage, HighlightStyle, syntaxHighlighting, type StringStream } from "@codemirror/language";
+import { StreamLanguage, HighlightStyle, indentService, syntaxHighlighting, type StringStream } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
-import { autocompletion, snippetCompletion, startCompletion, type Completion, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
+import { autocompletion, startCompletion, type Completion, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
 import { hoverTooltip, EditorView } from "@codemirror/view";
 import { linter, lintGutter, type Diagnostic as CMDiagnostic } from "@codemirror/lint";
 import type { EditorState, Extension } from "@codemirror/state";
@@ -15,8 +15,10 @@ import { normKey } from "./tree";
 import { KEYWORDS, PII_ENTITIES, RULE_TEMPLATES, STEP_TEMPLATES } from "./vocab";
 import type { CompileResult } from "./types";
 import { COMPONENTS, componentSpec, fieldSpec, formatValue, inlineDefaults } from "./configSchema";
-import { ancestorsAt, levelOf, listOptions, sectionBlock, indentSuggestion, siblingKeys, translateKey, valueOptions, type Level } from "./suggest";
-import { contextFrom, dropdowns, ghostText, rtlLines, showAllOptions } from "./assist";
+import { ancestorsAt, canSeedBlock, indentOf, indentSuggestion, keyLine, keywordId, laneBlock, lastMs, levelOf, listOptions, proposalText, sectionBlock, siblingKeys, stageBlock, subcaseBlock, translateKey, valueOptions, type Level } from "./suggest";
+import { contextFrom, currentDraft, dropdowns, ghostText, openOptions, rtlLines, showIntentDraft, takeUnfilteredOptions } from "./assist";
+import { applyRepair, collectDraftIssues, commentFragment, intentChoices, validatedIntentRepair, type DraftIssue, type Repair } from "./repairs";
+import { draftIntent } from "./intent";
 
 // ------------------------------------------------------------------ tokenizer
 interface TokState {
@@ -113,7 +115,7 @@ function keyCompletions(level: Level, anc: string[], ar: boolean): Completion[] 
     }));
   }
   const lv = level === "top" ? "top" : level === "case-file" ? "case-file" : level;
-  return KEYWORDS.filter((k) => k.level === lv).map((k) => ({
+  return KEYWORDS.filter((k) => k.level === lv || (lv === "stage" && k.level === "breach")).map((k) => ({
     label: ar && k.ar ? k.ar : k.key,
     apply: (ar && k.ar ? k.ar : k.key) + ": ",
     type: "keyword",
@@ -124,22 +126,25 @@ function keyCompletions(level: Level, anc: string[], ar: boolean): Completion[] 
 }
 
 function caseSpineCompletions(ctx: CompletionContext): CompletionResult | null {
-  const showAll = showAllOptions.next;
-  showAllOptions.next = false;
+  const showAll = takeUnfilteredOptions(ctx.view);
   const line = ctx.state.doc.lineAt(ctx.pos);
   const before = line.text.slice(0, ctx.pos - line.from);
-  const indent = before.length - before.trimStart().length;
+  if (/^\s*#/.test(before)) return null;
+  const indent = indentOf(before);
   const res = compiledFor(ctx.state);
-  const sctx = contextFrom(res);
+  const lines = docLines(ctx.state);
+  const sctx = contextFrom(res, line.number, lines);
   const ar = res.language === "ar";
-  const anc = ancestorsAt(docLines(ctx.state), line.number - 1, indent);
+  const anc = ancestorsAt(lines, line.number - 1, indent);
   const level = levelOf(anc);
+  const tailOfLine = line.text.slice(ctx.pos - line.from);
 
   // Milestone names anywhere after "Milestone "
   const msm = /(Milestone|المعلم)\s+(\w*)$/.exec(before);
   if (msm) {
     return {
       from: ctx.pos - msm[2].length,
+      to: ctx.pos + (/^\w*/.exec(tailOfLine)?.[0].length ?? 0),
       options: [...new Set([...sctx.milestones, "IndexReady", "InquiryResolved", "CaseResolved"])].map((m) => ({ label: m, type: "constant", detail: sctx.milestones.includes(m) ? "reached in this case" : "new" })),
     };
   }
@@ -201,65 +206,86 @@ function caseSpineCompletions(ctx: CompletionContext): CompletionResult | null {
 
   if (kv && level !== "rules" && level !== "steps") {
     const typed = kv[2];
-    const suffix = line.text.slice(ctx.pos - line.from);
+    const block = !typed && !tailOfLine.trim() && canSeedBlock(lines, line.number - 1, indent) ? sectionBlock(kv[1], sctx) : null;
+    if (block && !showAll) return {
+      from: ctx.pos,
+      options: [{
+        label: `Start ${kv[1]}`,
+        apply: indentSuggestion("\n" + block.join("\n"), indent),
+        detail: "insert an editable example",
+      }],
+    };
     if (typed.startsWith("[") && typed.includes("]") && !showAll) return null;
-    const opts = valueOptions(kv[1], anc, sctx);
+    const opts = valueOptions(level === "stage" && keywordId(kv[1]) === "on breach" && typed ? "Escalate To" : kv[1], anc, sctx);
     if (!opts.length) return null;
     return {
       from: ctx.pos - typed.length,
-      to: ctx.pos + suffix.length,
+      to: line.to,
       options: opts.map((o, i) => ({ label: o, apply: (before.endsWith(":") ? " " : "") + o, type: "text", boost: -i, detail: i === 0 ? "suggested" : undefined })),
       filter: !showAll,
     };
   }
   // Start of an item / key
-  const head = /^\s*(-\s+)?([^:]*)$/.exec(before);
+  const head = /^\s*(-(?:\s+|$))?([^:]*)$/.exec(before);
   if (!head) return null;
 
   const from = ctx.pos - head[2].length;
+  const dash = head[1] ?? "";
+  const item = (value: string) => dash ? (dash === "-" ? " " : "") + value : "- " + value;
+  const blockItem = (block: string[]) => indentSuggestion([item(block[0].replace(/^- /, "")), ...block.slice(1)].join("\n"), indent);
   if (level === "rules") {
-    const ms = sctx.milestones[sctx.milestones.length - 1] ?? "InquiryResolved";
+    const ms = lastMs(sctx);
+    const typed = head[2].toLowerCase();
+    const matching = RULE_TEMPLATES.filter((rule) => rule.text.toLowerCase().startsWith(typed));
+    const prose = !!typed && matching.length > 0;
     return {
       from,
-      options: RULE_TEMPLATES.map((r) =>
-        snippetCompletion(r.text.replace("${Milestone}", "${" + ms + "}"), { label: r.label, detail: r.detail, type: "function", info: "SBVR rule → Lean 4 proposition" }),
-      ),
-      filter: true,
+      to: line.to,
+      options: (prose && !showAll ? matching : RULE_TEMPLATES).map((r) => {
+        const rule = r.text.replace("${Milestone}", ms);
+        return { label: r.label, apply: item(rule), detail: r.detail, type: "function", info: rule };
+      }),
+      filter: !showAll && !prose,
     };
   }
   if (level === "steps") {
-    return { from, options: STEP_TEMPLATES.map((st) => ({ label: st, type: "method", detail: classifyStep(st).map((k) => KIND_META[k.kind].engine).join(" ") })) };
+    return { from, to: line.to, options: STEP_TEMPLATES.map((st) => ({ label: st, apply: item(st), type: "method", detail: classifyStep(st).map((k) => KIND_META[k.kind].engine).join(" ") })) };
   }
   if (level === "lane-name" || level === "cf-name") {
-    const names = level === "lane-name" ? ["Case Owner", "Head of Compliance", ...sctx.lanes] : ["Policy Documents", "Evidence File"];
-    return { from, options: [...new Set(names)].map((name) => ({ label: name, apply: name + ":", type: "class" })) };
+    const names = level === "lane-name" ? ["Case Owner", "Head of Compliance", "Compliance Reviewer"] : ["Policy Documents", "Evidence File"];
+    const used = siblingKeys(lines, line.number - 1, indent);
+    return { from, to: line.to, options: names.filter((name) => !used.has(keywordId(name))).map((name) => ({
+      label: name,
+      apply: indentSuggestion((level === "lane-name" ? laneBlock(name) : [name + ":", '  Source: pdf("documents.pdf")']).join("\n"), indent),
+      type: "class",
+    })) };
   }
-  if (anc[0] === "subcases")
-    return { from, options: [snippetCompletion("Subcase: ${Name}", { label: "Subcase", type: "class" })] };
+  if (level === "subcases")
+    return { from, to: line.to, options: [{ label: "Subcase", apply: blockItem(subcaseBlock()), type: "class" }] };
+  if (level === "proposals")
+    return { from, to: line.to, options: [{ label: "Suggest policy review", apply: blockItem([proposalText(sctx)]), type: "class" }] };
   if (level === "other") return null;
   if (level === "process") {
+    const previous = sctx.stages?.filter((stage) => stage.line < line.number).at(-1)?.milestone;
+    const block = stageBlock(sctx, previous ?? null);
     return {
       from,
-      options: [
-        snippetCompletion("Stage ${1} (${Name}):\n      When: ${trigger}\n      Steps:\n        - ${step}\n      Reach Milestone: ${Milestone}", { label: "Stage", type: "class", detail: "BPMN SubProcess" }),
-      ],
+      to: line.to,
+      options: [{ label: block[0].slice(2, -1), apply: blockItem(block), type: "class", detail: "add a stage with a trigger and milestone" }],
     };
   }
-  const opts = keyCompletions(level, anc, ar).map((option) => {
+  const present = siblingKeys(lines, line.number - 1, indent);
+  const opts = keyCompletions(level, anc, ar).filter((option) => !present.has(keywordId(option.label))
+    && !(res.root && keywordId(option.label) === "case")).map((option) => {
     const key = translateKey(option.label);
-    const block = sectionBlock(key, sctx);
-    if (block && level !== "config" && level !== "config-fields") return {
-      ...option,
-      apply: indentSuggestion(option.label + ":\n" + block.join("\n"), indent + (head[1]?.length ?? 0)),
-    };
-    return option;
+    return { ...option, apply: indentSuggestion(option.label + keyLine(key, level, anc, sctx), indent) };
   });
   if (!res.root && level === "top") {
     return { from, options: opts.filter((option) => translateKey(option.label) === "Case").map((option) => ({
       ...option, apply: option.label + ": My Business Case",
     })) };
   }
-  return { from, options: opts, validFor: /^[\w &()\u0600-\u06FF-]*$/ };
+  return { from, to: line.to, options: opts };
 }
 
 // ------------------------------------------------------------------ hover
@@ -284,7 +310,8 @@ function pickList(view: EditorView, options: string[], from: number, to: number,
 const hover = hoverTooltip((view, pos) => {
   const line = view.state.doc.lineAt(pos);
   const res = compiledFor(view.state);
-  const sctx = contextFrom(res);
+  const lines = docLines(view.state);
+  const sctx = contextFrom(res, line.number, lines);
   const dom = document.createElement("div");
   dom.className = "cs-hover";
   const k = lineKey(line.text);
@@ -310,7 +337,7 @@ const hover = hoverTooltip((view, pos) => {
   const dash = line.text.trimStart().startsWith("-") ? 2 : 0;
   const keyStart = line.from + k.indent + dash;
   const keyEnd = keyStart + k.key.length;
-  const anc = ancestorsAt(docLines(view.state), line.number - 1, k.indent);
+  const anc = ancestorsAt(lines, line.number - 1, k.indent);
   const level = levelOf(anc);
   const valueStart = line.text.indexOf(":", k.indent + dash) + 1;
   const rawValue = line.text.slice(valueStart).trim();
@@ -343,9 +370,9 @@ const hover = hoverTooltip((view, pos) => {
     dom.innerHTML = `<div class="cs-hover-k"><b>${escapeHtml(fs.key)}</b> · ${fs.type}${fs.type === "number" ? ` ${fs.min}–${fs.max}` : ""} · default <code>${escapeHtml(formatValue(fs.default))}</code></div><div>${escapeHtml(fs.doc)}</div>`;
   } else return null;
   // Other keys that fit here — click to add one below.
-  const present = siblingKeys(docLines(view.state), line.number - 1, k.indent);
-  const siblings = (level === "config" ? COMPONENTS.map((c) => c.name) : level === "config-fields" ? componentSpec(anc[0])?.fields.map((f) => f.key) ?? [] : KEYWORDS.filter((x) => x.level === (doc?.level ?? "")).map((x) => x.key))
-    .filter((x) => !present.has(normKey(x)) && normKey(x) !== normKey(en));
+  const present = siblingKeys(lines, line.number - 1, k.indent);
+  const siblings = keyCompletions(level, anc, res.language === "ar").map((option) => option.label)
+    .filter((key) => !present.has(keywordId(key)) && keywordId(key) !== keywordId(en) && keywordId(key) !== "case");
   if (siblings.length) {
     const lab = document.createElement("div");
     lab.className = "cs-hover-sub";
@@ -359,9 +386,12 @@ const hover = hoverTooltip((view, pos) => {
       b.textContent = sib;
       b.onmousedown = (e) => {
         e.preventDefault();
-        const ind = " ".repeat(k.indent) + (dash ? "- " : "");
-        const val = level === "config" ? inlineDefaults(componentSpec(sib)!) : valueOptions(sib, anc, sctx)[0] ?? "";
-        view.dispatch({ changes: { from: line.to, insert: `\n${ind}${sib}: ${val}` }, selection: { anchor: line.to + 1 + ind.length + sib.length + 2 + val.length } });
+        const lines = docLines(view.state);
+        let after = line.number;
+        while (after < lines.length && lines[after].trim() && indentOf(lines[after]) > k.indent) after++;
+        const from = view.state.doc.line(after).to;
+        const insert = "\n" + " ".repeat(k.indent) + indentSuggestion(sib + keyLine(translateKey(sib), level, anc, sctx), k.indent);
+        view.dispatch({ changes: { from, insert }, selection: { anchor: from + insert.length }, userEvent: "input.complete" });
         view.focus();
       };
       wrap.appendChild(b);
@@ -376,32 +406,156 @@ function escapeHtml(s: string) {
 }
 
 // ------------------------------------------------------------------ lint
+const intentEndpoint = import.meta.env.VITE_CASESPINE_INTENT_ENDPOINT?.trim();
+
+function applyEditorRepair(view: EditorView, snapshot: string, repair: Repair) {
+  if (view.state.doc.toString() !== snapshot) return;
+  const changes = view.state.changes([repair, ...(repair.more ?? [])].map((edit) => {
+    const line = view.state.doc.line(edit.line);
+    return { from: line.from + edit.from, to: line.from + edit.to, insert: edit.insert };
+  }));
+  const to = view.state.doc.line(repair.line).from + repair.to;
+  view.dispatch({
+    changes,
+    selection: { anchor: changes.mapPos(to, 1) },
+    scrollIntoView: true,
+    userEvent: "input.complete",
+  });
+  view.focus();
+}
+
+function draftDiagnostic(state: EditorState, snapshot: string, issue: DraftIssue, severity: CMDiagnostic["severity"]): CMDiagnostic {
+  const line = state.doc.line(issue.line);
+  const repairs = issue.repairs.map((repair) => ({
+    name: repair.label,
+    apply: (view: EditorView) => applyEditorRepair(view, snapshot, repair),
+  }));
+  if (issue.ambiguous) repairs.push({
+    name: "Keep as a # comment",
+    apply: (view) => applyEditorRepair(view, snapshot, {
+      label: "Keep as a # comment", line: issue.line, from: 0, to: line.length, insert: commentFragment(line.text),
+    }),
+  });
+  if (!repairs.length) repairs.push({
+    name: "Show suggestions",
+    apply: (view) => {
+      if (view.state.doc.toString() !== snapshot) return;
+      view.dispatch({ selection: { anchor: line.to }, scrollIntoView: true });
+      view.focus();
+      openOptions(view);
+    },
+  });
+  const diagnostic: CMDiagnostic = {
+    from: line.from + issue.from,
+    to: line.from + issue.to,
+    severity,
+    markClass: issue.ambiguous ? "cs-unrecognized" : "cs-unfinished",
+    message: issue.message,
+    source: "CaseSpine",
+    actions: repairs,
+  };
+  if (intentEndpoint && issue.ambiguous && line.text.trim().length <= 400) {
+    const endpoint = intentEndpoint;
+    const choices = intentChoices(snapshot, issue.line, contextFrom(compiledFor(state), issue.line, snapshot.split("\n")));
+    diagnostic.renderMessage = (view) => {
+      const wrap = document.createElement("span");
+      wrap.className = "cs-intent";
+      const message = document.createElement("span");
+      message.textContent = issue.message;
+      const ask = document.createElement("button");
+      ask.type = "button";
+      ask.className = "cm-diagnosticAction";
+      ask.textContent = "Ask AI about this line";
+      const status = document.createElement("span");
+      status.className = "cs-intent-status";
+      status.setAttribute("role", "status");
+      ask.onclick = async () => {
+        if (ask.disabled || view.state.doc.toString() !== snapshot) return;
+        ask.disabled = true;
+        status.textContent = "Checking this fragment…";
+        try {
+          const response = await fetch(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ fragment: line.text.trim(), options: choices.map(({ id, label }) => ({ id, label })) }),
+            signal: AbortSignal.timeout(8000),
+          });
+          if (!response.ok) throw new Error("Intent check failed");
+          const answer: { choice?: unknown; command?: unknown } = await response.json();
+          if (view.state.doc.toString() !== snapshot || !wrap.isConnected) return;
+          const proposed = typeof answer.command === "string" ? draftIntent(snapshot, issue.line, answer.command) : null;
+          const choice = choices.find((option) => option.id === answer.choice);
+          const repair = !proposed && choice ? validatedIntentRepair(snapshot, issue.line, choice) : null;
+          if (proposed) {
+            view.dispatch({ selection: { anchor: line.to }, scrollIntoView: true });
+            view.focus();
+            showIntentDraft(view, proposed);
+          } else if (repair) {
+            const source = applyRepair(snapshot, repair);
+            view.dispatch({ selection: { anchor: line.to }, scrollIntoView: true });
+            view.focus();
+            showIntentDraft(view, { line: issue.line, text: repair.insert, source, compiled: compileSpec(source) });
+          } else {
+            status.textContent = "No reliable CaseSpine interpretation. Keep the text as a comment.";
+          }
+        } catch {
+          status.textContent = "AI unavailable. You can keep the text as a comment.";
+          ask.disabled = false;
+        }
+      };
+      const note = document.createElement("small");
+      note.textContent = "Sends only this line and the available choices. Use demo text.";
+      wrap.append(message, ask, note, status);
+      return wrap;
+    };
+  }
+  return diagnostic;
+}
+
 const lint = linter(
   (view) => {
     const res = compiledFor(view.state);
+    const snapshot = view.state.doc.toString();
+    const lines = snapshot.split("\n");
+    const drafts = collectDraftIssues(snapshot, res, (line) => contextFrom(res, line, lines));
+    const errors = new Set(res.diagnostics.filter((d) => d.severity === "error").map((d) => d.line));
+    const previewLine = currentDraft(view.state)?.line;
+    const repairedLines = new Set(drafts.map((issue) => issue.line));
     const out: CMDiagnostic[] = [];
     for (const d of res.diagnostics) {
-      if (d.line < 1 || d.line > view.state.doc.lines) continue;
+      if (d.line < 1 || d.line > view.state.doc.lines || d.line === previewLine) continue;
+      if (repairedLines.has(d.line) && d.severity === "error") continue;
       const l = view.state.doc.line(d.line);
       if (!l.text.trim()) continue;
       const start = l.from + (l.text.length - l.text.trimStart().length);
       out.push({ from: start, to: l.to, severity: d.severity, message: d.message, source: "casespine" });
     }
-    return out;
+    return out.concat(drafts.filter((issue) => issue.line !== previewLine)
+      .map((issue) => draftDiagnostic(view.state, snapshot, issue, errors.has(issue.line) || issue.ambiguous ? "error" : "warning")));
   },
-  { delay: 130 },
+  { delay: 130, needsRefresh: (update) => currentDraft(update.state) !== currentDraft(update.startState) },
 );
 
 export function caseSpineLanguage(): Extension[] {
   return [
     casespineStream,
     syntaxHighlighting(highlight),
+    indentService.of((context, pos) => {
+      const line = context.state.doc.lineAt(pos);
+      const before = line.text.slice(0, pos - line.from);
+      if (context.simulatedBreak !== pos || !before.trimEnd().endsWith(":") || /^\s*#/.test(before)) return null;
+      return indentOf(before) + (/^\s*-\s+Stage\b/i.test(before) ? 4 : 2);
+    }),
     autocompletion({ override: [caseSpineCompletions], activateOnTyping: true, activateOnTypingDelay: 65, icons: false }),
     EditorView.updateListener.of((update) => {
       if (!update.docChanged || !update.view.hasFocus) return;
       const { head } = update.state.selection.main;
       const line = update.state.doc.lineAt(head);
-      if (!/(?:[:[,]|^\s*)\s*$/.test(line.text.slice(0, head - line.from))) return;
+      const before = line.text.slice(0, head - line.from);
+      if (!/(?:[:[,]|^\s*-?)\s*$/.test(before)) return;
+      if (/^\s*$/.test(before) && !before.length) return;
+      const block = lineKey(before);
+      if (block && before.trimEnd().endsWith(":") && sectionBlock(block.key, contextFrom(compiledFor(update.state), line.number))) return;
       const state = update.state;
       requestAnimationFrame(() => {
         if (update.view.state === state && update.view.hasFocus) startCompletion(update.view);

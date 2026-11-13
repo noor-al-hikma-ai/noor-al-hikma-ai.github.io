@@ -6,12 +6,41 @@ import type { BindingValue } from "../src/lib/casespine/bindings";
 import { suggestContinuation, indentSuggestion } from "../src/lib/casespine/suggest";
 import { contextFrom } from "../src/lib/casespine/assist";
 import { draftFromDescription, EXAMPLE_DESCRIPTIONS } from "../src/lib/casespine/copilot";
+import { draftIntent } from "../src/lib/casespine/intent";
 import { sha256Hex } from "../src/lib/sha256";
 
 const out = process.argv[2] ?? "./.test-out";
 mkdirSync(out, { recursive: true });
 let failures = 0;
 const check = (cond: boolean, msg: string) => { if (!cond) { failures++; console.log("  ✗ " + msg); } };
+
+{
+  let src = "Case: Authoring test";
+  for (const [command, expected] of [
+    ["Hey, add the lane with the requirements X, Y, Z", /Roles: \[X, Y, Z\]/],
+    ["Add a lane called Review Board with SSO UAE PASS, roles REVIEW, clearance AML", /Review Board:\n    SSO Provider: UAE PASS\n    Roles: \[REVIEW\]\n    Clearance: \[AML\]/],
+    ["Add a case file called Wire policy from wire.pdf", /Source: pdf\("wire\.pdf"\)/],
+    ["Add a stage called Assess the transfer with a step Read the policy", /Stage 1 \(Assess the transfer\)/],
+    ["Add a step Check the evidence", /- Check the evidence/],
+    ["Add a second stage called Sign off", /When: Milestone EvidenceReady is achieved/],
+    ["Add a rule citation coverage >= 95%", /citation coverage >= 95% before Milestone ReviewComplete/],
+    ["Escalate to Review Board", /Escalate To: Review Board/],
+    ["Add a gateway", /Exit Gateway:\n        If: all Binding Lean Contract rules hold/],
+    ["Add a constraint Residency: Keep case data in the UAE", /Residency: Keep case data in the UAE/],
+    ["Set budget ceiling to 9000 tokens or $0.20", /Budget Ceiling: 9000 tokens or \$0.20/],
+    ["Add a component Retriever", /Retriever: \{ Mode: hybrid/],
+    ["Set Retriever Top K to 4", /Top K: 4/],
+    ["Add a proposal Check policy changes reviewed by Review Board", /Moderated by: Review Board/],
+    ["Add a subcase called Exceptions", /Subcase: Exceptions/],
+  ] as const) {
+    const candidate = draftIntent(src + "\n" + command, src.split("\n").length + 1);
+    check(!!candidate && expected.test(candidate.source), `plain-language draft: ${command}`);
+    if (candidate) src = candidate.source;
+  }
+  check(!!draftIntent("Please add a lane called Approvers", 1)?.compiled.root?.lanes.length, "plain-language lane from blank");
+  check(!draftIntent(src + "\nfluffy unicorn on a trampoline", src.split("\n").length + 1), "unrelated text stays unresolved");
+  check(!draftIntent(src + "\nNeed independent reviewers", src.split("\n").length + 1, "add rule invented metric >= 2"), "unknown model-invented rule probes are rejected");
+}
 
 for (const s of ["", "abc", "x".repeat(1000), "CaseSpine ✓ نور الحكمة"]) {
   check(sha256Hex(s) === createHash("sha256").update(s).digest("hex"), `sha256 mismatch for ${JSON.stringify(s.slice(0, 10))}`);

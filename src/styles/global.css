@@ -242,6 +242,10 @@ table.paper-table { width: 100%; border-collapse: collapse; font-size: 15px; fon
 :root .cm-editor .cm-lintRange-warning { background-image: none; text-decoration: underline wavy var(--warn) 1px; text-underline-offset: 3px; }
 :root .cm-editor .cm-lintRange-error { background-image: none; text-decoration: underline wavy var(--danger) 1px; text-underline-offset: 3px; }
 :root .cm-editor .cm-lintRange-info { background-image: none; }
+:root .cm-editor .cs-unfinished { background-color: var(--gold-soft); border-radius: 3px; }
+:root .cm-editor .cs-unrecognized { background-color: color-mix(in oklab, var(--danger) 12%, var(--card)); border-radius: 3px; }
+:root .cm-editor .cs-intent { display: grid; gap: 4px; }
+:root .cm-editor .cs-intent .cm-diagnosticAction { justify-self: start; }
 :root .cm-editor .cm-hl-line { background: color-mix(in oklab, var(--turquoise) 16%, transparent) !important; animation: hlflash 1.4s ease; }
 @keyframes hlflash { 0% { background: color-mix(in oklab, var(--gold-2) 55%, transparent); } 100% { background: color-mix(in oklab, var(--turquoise) 16%, transparent); } }
 :root .cm-editor .cs-hover { padding: 8px 12px; max-width: 460px; font-size: 13px; line-height: 1.45; }
@@ -298,6 +302,7 @@ input[type="range"] { accent-color: var(--emerald); width: 100%; }
 
 /* ghost text, ▾ dropdowns, quick-pick */
 :root .cm-editor .cm-ghost { color: var(--ink-3); opacity: 0.62; font-style: italic; white-space: pre; pointer-events: none; }
+:root .cm-editor .cm-ghost-rewrite { display: inline-block; white-space: pre-wrap; color: var(--ink-2); opacity: 0.78; }
 :root .cm-editor .cm-ghost-hint { font-style: normal; font-family: var(--sans); font-size: 10px; margin-left: 8px; padding: 0 5px; border: 1px solid var(--rule-2); border-radius: 4px; color: var(--ink-3); background: var(--card); vertical-align: 1px; }
 :root .cm-editor .cm-drop { margin-left: 6px; border: 1px solid var(--rule-2); background: var(--gold-soft); color: var(--gold); border-radius: 5px; font-size: 10px; line-height: 1; padding: 2px 5px; cursor: pointer; vertical-align: 1px; opacity: 0.55; transition: opacity 0.15s; }
 :root .cm-editor .cm-line:hover .cm-drop, :root .cm-editor .cm-activeLine .cm-drop { opacity: 1; }

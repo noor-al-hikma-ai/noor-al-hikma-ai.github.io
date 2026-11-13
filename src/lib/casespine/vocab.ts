@@ -8,8 +8,26 @@ export interface KeywordDoc {
   doc: string;
   std?: string;
   snippet?: string;
-  level: "top" | "case-file" | "lane" | "guards" | "stage" | "gateway" | "contract" | "deployment";
+  level: "top" | "case-file" | "lane" | "guards" | "stage" | "breach" | "gateway" | "contract" | "deployment" | "constraints" | "actuators";
 }
+
+export const CONSTRAINT_FACETS = [
+  { key: "Compliance", ar: "الامتثال", example: "Record the policy source and reviewer decision for every release." },
+  { key: "Risk", ar: "المخاطر", example: "Send policy exceptions to a human reviewer." },
+  { key: "Value", ar: "القيمة", example: "Reduce manual review time without reducing coverage." },
+  { key: "Cost", ar: "التكلفة", example: "Target no more than $0.10 per review." },
+  { key: "Latency", ar: "زمن الاستجابة", example: "Target p95 response time under 2.5 seconds." },
+  { key: "Quality", ar: "الجودة", example: "Target at least 90% citation coverage." },
+  { key: "Residency", ar: "إقامة البيانات", example: "Keep case data in the UAE." },
+  { key: "Availability", ar: "التوافر", example: "Route requests to manual review during outages." },
+  { key: "Scale", ar: "السعة", example: "Plan for 100 concurrent reviews." },
+];
+
+export const ACTUATOR_FIELDS = [
+  { key: "Orchestrator", example: "Apache Airflow" },
+  { key: "Experiment & Lineage Tracker", example: "MLflow Model Registry" },
+  { key: "Deployment Target", example: "Kubernetes" },
+];
 
 export const KEYWORDS: KeywordDoc[] = [
   { key: "Case", ar: "الحالة", level: "top", std: "OMG CMMN 1.1 · CasePlanModel", doc: "Names the business case. Everything below compiles into one isolated namespace with its own SHA-256 isolation hash." },
@@ -19,6 +37,7 @@ export const KEYWORDS: KeywordDoc[] = [
   { key: "Engine", ar: "المحرك", level: "top", doc: "Optional explicit engines, e.g. [langgraph://, ortools_milp://]. Usually inferred from your steps." },
   { key: "Standards", ar: "المعايير", level: "top", doc: "Standards the compiler must honour when emitting artefacts (BPMN 2.0, CMMN, DMN, SBVR, PROV-O …)." },
   { key: "Population Segment", ar: "شريحة العملاء", level: "top", doc: "Customer segment for personalisation and fairness checks." },
+  { key: "Config", ar: "الإعدادات", level: "top", doc: "Settings for the components used in the workflow." },
   { key: "Lanes", ar: "المسارات", level: "top", std: "ISO/IEC 19510 BPMN 2.0 · Lane", doc: "Who takes part: each lane is a role with SSO identity, clearance and approval rights. Escalations route to lanes." },
   { key: "Case File", ar: "ملف الحالة", level: "top", std: "OMG CMMN 1.1 · CaseFileItem", doc: "Documents and data the case may read. Curation, PII redaction and namespace isolation are declared here." },
   { key: "Binding Lean Contract", ar: "العقد الملزم", level: "top", std: "OMG SBVR 1.5 → Lean 4 / Z3", doc: "Business rules in constrained English. Each rule compiles to a decidable Lean 4 proposition checked at milestone gates." },
@@ -26,9 +45,13 @@ export const KEYWORDS: KeywordDoc[] = [
   { key: "Process Flow", ar: "مسار العملية", level: "top", std: "BPMN 2.0 · SubProcess / CMMN · Stage", doc: "Ordered stages with sentries (When), steps, escalations and an exit gateway." },
   { key: "Subcases", ar: "الحالات الفرعية", level: "top", doc: "Nested cases inherit rules and theorem packs; their budgets must fit inside the parent's." },
   { key: "AI Smart Suggestions", level: "top", std: "CMMN DiscretionaryItem", doc: "AI proposals that a named lane must moderate before they take effect (human-in-the-middle)." },
-  { key: "Actuators", level: "top", doc: "Downstream orchestrators and trackers (Airflow, MLflow, Kubernetes …)." },
+  { key: "Actuators", ar: "المحركات التنفيذية", level: "top", doc: "Downstream orchestrators and trackers (Airflow, MLflow, Kubernetes …)." },
   { key: "Deployment", ar: "النشر", level: "top", doc: "Cloud, residency, identity and data-governance bindings for the compiled assembly." },
-  { key: "Business & Product Constraints", level: "top", doc: "Free-form facets (value, cost, latency, quality, risk, compliance, residency, availability, scale) kept in the IR for planners." },
+  { key: "Business & Product Constraints", ar: "قيود الأعمال والمنتج", level: "top", doc: "Record goals and requirements in the compiled plan. Use Binding Lean Contract to define checks the Sandbox can enforce." },
+  ...CONSTRAINT_FACETS.map(({ key, ar, example }): KeywordDoc => ({ key, ar, level: "constraints", doc: example })),
+  ...ACTUATOR_FIELDS.map(({ key, example }): KeywordDoc => ({ key, level: "actuators", doc: "Example: " + example })),
+  { key: "Rollout Strategy", level: "top", doc: "Describe how the case rolls out, such as a small canary before a wider release." },
+  { key: "Degradation Fallback", level: "top", doc: "Describe what should happen when the normal path is unavailable." },
   { key: "SSO Provider", ar: "مزود الدخول الموحد", level: "lane", doc: "Microsoft Entra ID, Okta, Ping, Keycloak, Google, AWS IAM Identity Center, UAE PASS, ADFS, any SAML 2.0 / OIDC IdP." },
   { key: "User", level: "lane", doc: "Named person for this lane (optional; usually resolved from SSO groups)." },
   { key: "Roles", ar: "الأدوار", level: "lane", doc: "Role claims, e.g. [HITM_APPROVER]. Approvers receive escalations." },
@@ -53,7 +76,7 @@ export const KEYWORDS: KeywordDoc[] = [
   { key: "When", ar: "عندما", level: "stage", std: "CMMN Sentry (event-condition)", doc: "Entry criterion for the stage." },
   { key: "Steps", ar: "الخطوات", level: "stage", doc: "Plain-English steps. The compiler maps them to engines (BM25, LangGraph, SQL, OR-Tools, tests, dashboards …)." },
   { key: "On Breach", ar: "عند الخرق", level: "stage", std: "BPMN Boundary Escalation Event", doc: "What happens when a guard or rule is breached in this stage." },
-  { key: "Escalate To", ar: "التصعيد إلى", level: "stage", doc: "A Lane (or queue) of eligible personnel; durable wait for human decision." },
+  { key: "Escalate To", ar: "التصعيد إلى", level: "breach", doc: "The lane or queue that reviews an exception." },
   { key: "Reach Milestone", ar: "بلوغ المعلم", level: "stage", std: "CMMN Milestone", doc: "Milestone reached when the stage completes; rules gated `before Milestone X` are checked here." },
   { key: "Exit Gateway (Lean 4 Spine Reference Monitor)", ar: "بوابة الخروج", level: "stage", std: "BPMN Exclusive Gateway + Lean 4", doc: "Output leaves the stage only if every inherited and local rule holds." },
   { key: "If", ar: "إذا", level: "gateway", doc: "Gateway condition, usually `all Binding Lean Contract rules hold`." },

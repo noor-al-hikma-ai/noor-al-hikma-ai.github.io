@@ -604,6 +604,7 @@ export function emitIR(r: CompileResult) {
         exit_gateway: s.gate ?? null,
       })),
       config: c.config,
+      constraints: c.constraints.map(({ facet, text }) => ({ facet, text })),
       deployment: c.deployment,
       actuators: c.actuators,
       satisfiable: c.satisfiable,

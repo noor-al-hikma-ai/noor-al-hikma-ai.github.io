@@ -2,11 +2,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { CodeEditor, type CodeEditorCommands } from "../components/CodeEditor";
 import { CaseCanvas } from "../components/CaseCanvas";
 import { CopilotPanel } from "../components/CopilotPanel";
+import { SketchWorkflow } from "../components/SketchWorkflow";
 import { caseSpineLanguage } from "../lib/casespine/language";
+import { openOptions } from "../lib/casespine/assist";
 import { emitAll } from "../lib/casespine/emit";
 import { buildCsar } from "../lib/casespine/csar";
-import { changedLines, removeRange } from "../lib/casespine/edits";
+import { authoringSlot, changedLines, removeRange, type AuthoringTarget } from "../lib/casespine/edits";
 import { EXAMPLES } from "../lib/casespine/examples";
+import { addNamedStage, type IntentDraft } from "../lib/casespine/intent";
+import { compileSpec } from "../lib/casespine/analyze";
 import type { CaseAST } from "../lib/casespine/types";
 import { getSpec, setSpec, useSpec } from "../store";
 import "./studio.css";
@@ -31,6 +35,8 @@ interface Toast {
 export default function Studio() {
   const { spec, compiled } = useSpec();
   const [cursorLine, setCursorLine] = useState<number | null>(null);
+  const [draft, setDraft] = useState<IntentDraft | null>(null);
+  const [sketch, setSketch] = useState(false);
   const [editorHl, setEditorHl] = useState<number[]>([]);
   const [tab, setTab] = useState("lean");
   const [focusNs, setFocusNs] = useState<string | null>(null);
@@ -49,6 +55,7 @@ export default function Studio() {
 
   const withStages = compiled.cases.filter((c) => c.stages.length);
   const focus: CaseAST | undefined = compiled.cases.find((c) => c.namespacePath === focusNs) ?? withStages[0] ?? compiled.root ?? undefined;
+  const visual = draft ? draft.compiled.cases.find((c) => c.namespacePath === focus?.namespacePath) ?? draft.compiled.root : focus;
   const targets = useMemo(() => emitAll(compiled, focus), [compiled, focus]);
 
   const csar = useMemo(() => tab === "csar" && compiled.root ? buildCsar(compiled) : null, [tab, compiled]);
@@ -57,6 +64,15 @@ export default function Studio() {
   const rules = compiled.cases.reduce((a, c) => a + c.rules.filter((r) => !r.inherited).length, 0);
   const current = targets.find((t) => t.id === tab);
   const exampleId = EXAMPLES.find((e) => e.src === spec)?.id ?? "";
+
+  function suggest(target: AuthoringTarget) {
+    if (!focus) {
+      editorCommands.current?.suggestAt(spec.split("\n").length, [""]);
+      return;
+    }
+    const slot = authoringSlot(spec, focus, target, cursorLine ?? undefined);
+    if (slot) editorCommands.current?.suggestAt(slot.line, slot.lines, target === "escalation" ? openOptions : undefined);
+  }
 
   const toast = (text: string, kind: Toast["kind"] = "ok") => {
     const id = Date.now() + Math.random();
@@ -71,6 +87,30 @@ export default function Studio() {
       /* ignore */
     }
   };
+
+  function previewSketch(stages: string[]) {
+    let source = spec.trim() ? spec : "Case: Sketched Workflow";
+    let result = compileSpec(source);
+    const namespace = focus?.namespacePath;
+    const count = focus?.stages.length ?? 0;
+    for (const name of stages) {
+      const target = result.cases.find((item) => item.namespacePath === namespace) ?? result.root;
+      if (!target) break;
+      source = addNamedStage(source, target, name);
+      result = compileSpec(source);
+    }
+    const target = result.cases.find((item) => item.namespacePath === namespace) ?? result.root;
+    const added = target?.stages.slice(count) ?? [];
+    if (added.length !== stages.length || result.diagnostics.some((item) => item.severity === "error")) {
+      toast("Resolve the source errors before adding the sketched stages.", "bad");
+      return;
+    }
+    setSketch(false);
+    const lines = source.split("\n");
+    const text = [...(spec.trim() ? [] : [lines[0], "Process Flow:"]), ...added.flatMap((stage) => lines.slice(stage.line - 1, stage.endLine))].join("\n");
+    const last = spec.split("\n").length;
+    editorCommands.current?.previewDraft({ line: last, text: "\n" + text, source, compiled: result, append: true });
+  }
 
   // Every visual edit is a text edit: apply it, then flash the lines it touched.
   const applyEdit = (fn: (src: string, c: CaseAST) => string, what?: string) => {
@@ -119,6 +159,7 @@ export default function Studio() {
           <button className="btn btn-gold" onClick={() => { setCopilot(true); dismissCoach(); }}>
             ✨ Start from plain words
           </button>
+          <button className="btn btn-ghost" onClick={() => { setSketch(true); dismissCoach(); }}>Sketch workflow</button>
           <select
             value={exampleId}
             onChange={(e) => {
@@ -146,6 +187,7 @@ export default function Studio() {
         </div>
       </div>
 
+      {sketch && <SketchWorkflow onClose={() => setSketch(false)} onPreview={previewSketch} />}
       {coach && (
         <div className="coach fade-up" role="note">
           <b>New here?</b> Click <b>✨ Start from plain words</b> and describe your case — or put the cursor at the end of any line in the editor and press
@@ -177,22 +219,34 @@ export default function Studio() {
               setFocusNs(null);
               setEditorHl([]);
             }} disabled={!spec}>Start blank</button>
-            <button className="btn btn-ghost btn-sm" onClick={() => editorCommands.current?.suggestSection()}>{spec ? "Add section" : "Suggest first line"}</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => suggest("section")}>{spec ? "Add section" : "Suggest first line"}</button>
             <button className="btn btn-ghost btn-sm" onClick={() => { setSpec(EXAMPLES[0].src); toast("Reset to the reference example", "info"); }} title="Restore the reference example">
               Reset
             </button>
           </div>
+          {focus && <div className="studio-authoring" role="group" aria-label="Workflow suggestions">
+            <button className="btn btn-ghost btn-sm" onClick={() => suggest("lane")}>Add lane</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => suggest("stage")}>Add stage</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => suggest("rule")}>Add rule</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => suggest("escalation")} disabled={!focus.stages.length}>Add escalation</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => suggest("gateway")} disabled={!focus.stages.length}>Add gateway</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => suggest("constraint")}>Add constraint</button>
+          </div>}
           {!spec && <p className="muted" style={{ margin: "8px 12px" }}>
-            Choose Suggest first line to name your case. Then use Add section to insert a Process Flow.
+            Choose Suggest first line to name your case. Then use the editor buttons or press Tab to build your workflow.
           </p>}
           <div style={{ flex: 1, minHeight: 0 }}>
-            <CodeEditor commands={editorCommands} value={spec} onChange={setSpec} onCursorLine={setCursorLine} highlight={editorHl} language={language} />
+            <CodeEditor commands={editorCommands} value={spec} onChange={setSpec} onCursorLine={setCursorLine} onDraft={setDraft} highlight={editorHl} language={language} />
           </div>
         </section>
 
         <section className="panel studio-canvas" aria-label="Visual program">
           <div className="panel-head">
-            <span className="label">Visual · click a widget to configure</span>
+            <span className="label">{draft ? "Suggested workflow" : "Visual · click a widget to configure"}</span>
+            {draft && <>
+              <button className="btn btn-emerald btn-sm" onClick={() => editorCommands.current?.acceptDraft()}>Accept draft</button>
+              <button className="btn btn-ghost btn-sm" onClick={() => editorCommands.current?.dismissDraft()}>Dismiss draft</button>
+            </>}
             {compiled.cases.length > 1 && (
               <select value={focus?.namespacePath ?? ""} onChange={(e) => setFocusNs(e.target.value)} aria-label="Case shown on canvas" style={{ maxWidth: 260, fontSize: 12.5, padding: "3px 6px" }}>
                 {compiled.cases.map((c) => (
@@ -205,13 +259,14 @@ export default function Studio() {
             )}
           </div>
           <div style={{ flex: 1, minHeight: 0 }}>
-            {focus ? (
+            {visual ? (
               <CaseCanvas
-                ast={focus}
-                editable
+                ast={visual}
+                editable={!draft}
+                outline
                 height="100%"
-                highlightLines={cursorLine ? [cursorLine] : []}
-                onSelectLines={(lines) => setEditorHl(lines)}
+                highlightLines={cursorLine && !draft ? [cursorLine] : []}
+                onSelectLines={draft ? undefined : (lines) => setEditorHl(lines)}
                 onEdit={(fn) => applyEdit(fn)}
                 onPalette={(label, fn) => applyEdit(fn, `Added ${label}`)}
                 onRemove={(range) => {

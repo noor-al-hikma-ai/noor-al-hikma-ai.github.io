@@ -1,4 +1,4 @@
-import { useEffect, useImperativeHandle, useRef, type Ref } from "react";
+import { useEffect, useImperativeHandle, useLayoutEffect, useRef, type Ref } from "react";
 import { EditorState, StateEffect, StateField, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, type DecorationSet } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
@@ -6,6 +6,8 @@ import { bracketMatching, indentOnInput, foldGutter } from "@codemirror/language
 import { closeBrackets, completionKeymap, startCompletion } from "@codemirror/autocomplete";
 import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
 import { lintKeymap } from "@codemirror/lint";
+import { acceptIntentDraft, currentDraft, dismissIntentDraft, showIntentDraft } from "../lib/casespine/assist";
+import type { IntentDraft } from "../lib/casespine/intent";
 
 const setHl = StateEffect.define<number[]>();
 const hlField = StateField.define<DecorationSet>({
@@ -23,7 +25,10 @@ const hlField = StateField.define<DecorationSet>({
 });
 
 export interface CodeEditorCommands {
-  suggestSection: () => void;
+  suggestAt: (line: number, lines?: string[], open?: (view: EditorView) => void) => void;
+  acceptDraft: () => void;
+  dismissDraft: () => void;
+  previewDraft: (draft: IntentDraft) => void;
 }
 
 interface Props {
@@ -31,32 +36,50 @@ interface Props {
   value: string;
   onChange: (v: string) => void;
   onCursorLine?: (line: number) => void;
+  onDraft?: (draft: IntentDraft | null) => void;
   highlight?: number[];
   language: Extension[];
   readOnly?: boolean;
 }
 
-export function CodeEditor({ value, onChange, onCursorLine, highlight, language, readOnly, commands }: Props) {
+export function CodeEditor({ value, onChange, onCursorLine, onDraft, highlight, language, readOnly, commands }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
-  const cb = useRef({ onChange, onCursorLine });
-  cb.current = { onChange, onCursorLine };
+  const cb = useRef({ onChange, onCursorLine, onDraft });
+  cb.current = { onChange, onCursorLine, onDraft };
 
   useImperativeHandle(commands, () => ({
-    suggestSection() {
+    previewDraft(draft) {
       const editor = view.current;
       if (!editor) return;
-      const last = editor.state.doc.line(editor.state.doc.lines);
-      const from = last.text.trim() ? last.to : last.from;
-      const insert = last.text.trim() ? "\n" : "";
+      const line = editor.state.doc.line(draft.line);
+      editor.dispatch({ selection: { anchor: line.to }, scrollIntoView: true });
+      editor.focus();
+      showIntentDraft(editor, draft);
+    },
+    acceptDraft() {
+      const editor = view.current;
+      if (editor && acceptIntentDraft(editor)) editor.focus();
+    },
+    dismissDraft() {
+      const editor = view.current;
+      if (editor && dismissIntentDraft(editor)) editor.focus();
+    },
+    suggestAt(line, lines, open = startCompletion) {
+      const editor = view.current;
+      if (!editor) return;
+      const anchorLine = editor.state.doc.line(line);
+      const useBlank = lines && !anchorLine.text.trim();
+      const from = useBlank ? anchorLine.from : anchorLine.to;
+      const insert = lines ? (useBlank ? "" : "\n") + lines.join("\n") : "";
       editor.dispatch({
-        changes: { from, to: last.to, insert },
+        changes: { from, to: anchorLine.to, insert },
         selection: { anchor: from + insert.length },
         scrollIntoView: true,
         userEvent: "input",
       });
       editor.focus();
-      startCompletion(editor);
+      open(editor);
     },
   }), []);
 
@@ -85,6 +108,8 @@ export function CodeEditor({ value, onChange, onCursorLine, highlight, language,
           EditorView.updateListener.of((u) => {
             if (u.docChanged) cb.current.onChange(u.state.doc.toString());
             if (u.selectionSet && u.view.hasFocus) cb.current.onCursorLine?.(u.state.doc.lineAt(u.state.selection.main.head).number);
+            const draft = currentDraft(u.state);
+            if (draft !== currentDraft(u.startState)) cb.current.onDraft?.(draft);
           }),
         ],
       }),
@@ -95,7 +120,7 @@ export function CodeEditor({ value, onChange, onCursorLine, highlight, language,
   }, []);
 
   // External value changes (palette, example picker) -> minimal transaction.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const v = view.current;
     if (!v) return;
     const cur = v.state.doc.toString();

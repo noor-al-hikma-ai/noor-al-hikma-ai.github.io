@@ -1,8 +1,8 @@
 # Noor Al Hikma AI — CaseSpine website
 
 Static website for **Noor Al Hikma AI** (نور الحكمة) and its CaseSpine language. It is a single-page
-React + D3 + TypeScript app built with Vite and hosted on GitHub Pages. Everything runs in the visitor's
-browser: there is no backend, no cookies and no analytics, and fonts are self-hosted.
+React + D3 + TypeScript app built with Vite and hosted on GitHub Pages. Compilation, the RAG Sandbox,
+and uploads run in the visitor's browser. Optional model features use a separately configured endpoint.
 
 | Page | URL | What it does |
 | --- | --- | --- |
@@ -30,6 +30,29 @@ Config:
 
 Values are validated (ranges, allowed options), inherited by subcases, emitted into the IR and LangGraph
 scaffold, and used by the sandbox runtime. Clicking a widget on the canvas edits the same lines.
+
+### Authoring a workflow
+
+In Studio, start blank, name your case, and use the buttons above the editor to add lanes,
+stages, contract rules, escalations, gateways, and constraints. Press Tab to accept grey text or
+Ctrl+Space to see available options. Hover over a highlighted draft fragment to see repairs.
+
+For a guided edit, type `Hey, add the lane with the requirements X, Y, Z`,
+`Add a stage called Screen payments`, or `Set Retriever Top K to 4` in the editor.
+Review the grey rewrite and the updated canvas, then press Tab or choose **Accept draft**.
+Use **Sketch workflow** on a phone to draw closed stage boxes, name them, and preview the linked stages.
+
+`Business & Product Constraints:` records requirements in the compiled manifest. Put a check in
+`Binding Lean Contract:` when the workflow must enforce it before release.
+
+A line whose first non-whitespace character is `#` is a comment. Comments are preserved in source
+and ignored by the compiler. Use a separate line for each comment.
+
+```text
+Business & Product Constraints:
+  # Confirm the data residency requirement with the case owner.
+  Residency: Keep case data in the UAE.
+```
 
 ## Run it on your Mac
 

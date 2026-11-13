@@ -98,3 +98,21 @@ questions about the synthetic collection only.
 Worker limits apply per Cloudflare location. Use the account's usage controls
 for the provider allowance and remove the repository variable to turn off the
 live mode after the demo. Then redeploy Pages and disable the Worker if unused.
+
+### Runpod model for Studio and the compliance demo
+
+`server/compliance-runpod.py` serves `/ask` and `/intent` from one model. Place the synthetic
+`policies.json` next to the service script. Filter the entries in `src/lib/compliance/policies.mjs`
+to `corpus: "synthetic"` and serialize them as JSON. Set `NOOR_ORIGIN` to the exact public
+site origin. Runpod's HTTPS proxy needs the process to listen on `0.0.0.0` and the pod to expose
+port `18879` as HTTP. Check `/health` through the proxy before updating the GitHub Pages variables.
+
+Set `VITE_COMPLIANCE_ENDPOINT` to the HTTPS URL ending in `/ask` and
+`VITE_CASESPINE_INTENT_ENDPOINT` to the URL ending in `/intent`, then redeploy Pages.
+Studio sends the highlighted line and possible interpretations when the user chooses
+**Ask AI about this line**. The browser validates a suggested edit and asks the user before applying it.
+Without the variable, Studio offers local repairs and the comment action.
+
+For a private rehearsal, forward the model listener over SSH and serve the site locally with a same-origin
+proxy to `/ask` and `/intent`. Check the Runpod console before changing ports on a running pod because
+saving the edit can reset the container. Use demo data when trying the model.

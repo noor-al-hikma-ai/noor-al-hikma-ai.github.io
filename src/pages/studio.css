@@ -7,6 +7,13 @@
   gap: 12px;
 }
 .studio-editor { grid-area: editor; }
+.studio-editor > .panel-head { flex-wrap: wrap; }
+.studio-authoring { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 8px; border-bottom: 1px solid var(--rule); }
+.sketch-workflow { max-width: 620px; }
+.sketch-body { display: grid; gap: 8px; padding: 12px 18px; overflow-y: auto; }
+.sketch-body canvas { width: 100%; height: auto; display: block; touch-action: none; background: var(--paper-2); border: 1px dashed var(--rule-2); border-radius: 9px; }
+.sketch-stage { display: grid; grid-template-columns: 64px 1fr; align-items: center; font-size: 13px; }
+.sketch-stage input { min-width: 0; }
 .studio-canvas { grid-area: canvas; }
 .studio-out { grid-area: out; }
 .studio .panel { overflow: hidden; }

@@ -60,6 +60,67 @@ function caseContainer(tree: SpecNode[], c: CaseAST): Container {
   return { nodes: item.children, indent: childIndent(item), endLine: item.endLine };
 }
 
+export type AuthoringTarget = "section" | "lane" | "stage" | "rule" | "escalation" | "gateway" | "constraint" | "proposal";
+export interface AuthoringSlot {
+  line: number;
+  /** Lines to insert before the completion cursor. Omit when editing an existing value. */
+  lines?: string[];
+}
+
+/** Put the cursor inside the requested section, using its existing indentation. */
+export function authoringSlot(src: string, c: CaseAST, target: AuthoringTarget, cursorLine?: number): AuthoringSlot | null {
+  const tree = treeOf(src);
+  const container = caseContainer(tree, c);
+  if (target === "section") return { line: container.endLine, lines: [" ".repeat(container.indent)] };
+  if (target === "escalation" || target === "gateway") {
+    const stage = c.stages.find((s) => cursorLine !== undefined && s.line <= cursorLine && cursorLine <= s.endLine) ?? c.stages.at(-1);
+    if (!stage) return null;
+    const node = findNode(tree, stage.line);
+    if (!node) return null;
+    if (target === "gateway") {
+      const gateway = node.children.find((n) => normKey(n.key) === "exit gateway");
+      return gateway
+        ? { line: gateway.endLine, lines: [" ".repeat(childIndent(gateway))] }
+        : { line: node.endLine, lines: [" ".repeat(node.children.length ? childIndent(node) : node.indent + 4)] };
+    }
+    const block = node.children.find((n) => normKey(n.key) === "on breach");
+    const field = block?.children.find((n) => normKey(n.key) === "escalate to")
+      ?? node.children.find((n) => normKey(n.key) === "escalate to");
+    if (field) return { line: field.line };
+    if (block?.value) return { line: block.line };
+    const indent = block ? childIndent(block) : (node.children.length ? childIndent(node) : node.indent + 4) + 2;
+    return {
+      line: block?.endLine ?? node.endLine,
+      lines: [...(block ? [] : [" ".repeat(indent - 2) + "On Breach:"]), " ".repeat(indent) + "Escalate To: "],
+    };
+  }
+
+  const key = { lane: "Lanes", stage: "Process Flow", rule: "Binding Lean Contract", constraint: "Business & Product Constraints", proposal: "AI Smart Suggestions" }[target];
+  const section = container.nodes.find((n) => normKey(n.key) === normKey(key));
+  const lines: string[] = [];
+  let line = section?.endLine ?? container.endLine;
+  let indent = section ? childIndent(section) : container.indent + 2;
+  if (!section) lines.push(" ".repeat(container.indent) + key + ":");
+  if (target === "rule") {
+    const rules = section?.children.find((n) => normKey(n.key) === "rules");
+    if (rules) {
+      line = rules.endLine;
+      indent = childIndent(rules);
+    } else {
+      lines.push(" ".repeat(indent) + "Rules:");
+      indent += 2;
+    }
+  }
+  return { line, lines: [...lines, " ".repeat(indent)] };
+}
+
+export function insertAuthoring(src: string, slot: AuthoringSlot, block: string[]): string {
+  const header = slot.lines?.slice(0, -1) ?? [];
+  const indent = /^\s*/.exec(slot.lines?.at(-1) ?? "")![0];
+  if (!slot.lines) return block.length === 1 ? replaceValueAtLine(src, slot.line, block[0]) : src;
+  return insertAfter(src, slot.line, [...header, ...block.map((line) => indent + line)]);
+}
+
 /**
  * Set `key: value` at `path` inside the case (e.g. ["Config", "Retriever"]),
  * creating missing sections in a tidy place and editing inline `{ … }` maps.

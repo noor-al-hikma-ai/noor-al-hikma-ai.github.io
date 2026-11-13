@@ -3,18 +3,27 @@
 
 import { Prec, StateEffect, StateField, type EditorState, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, type DecorationSet, type ViewUpdate } from "@codemirror/view";
+import { draftIntent, type IntentDraft } from "./intent";
 import { acceptCompletion, completionStatus, startCompletion } from "@codemirror/autocomplete";
 import { componentSpec } from "./configSchema";
 import type { CompileResult } from "./types";
-import { ancestorsAt, indentSuggestion, listOptions, translateKey, suggestContinuation, valueOptions, type SuggestContext } from "./suggest";
+import { ancestorsAt, indentOf, indentSuggestion, listOptions, translateKey, suggestContinuation, valueOptions, type SuggestContext } from "./suggest";
 
-export function contextFrom(res: CompileResult): SuggestContext {
+export function contextFrom(res: CompileResult, line?: number, lines?: string[]): SuggestContext {
+  const contains = (item: { line: number; endLine: number }) => line !== undefined && item.line <= line
+    && (line <= item.endLine || (lines && indentOf(lines[line - 1]) > indentOf(lines[item.line - 1])
+      && lines.slice(item.endLine, line - 1).every((text) => !text.trim() || /^\s*#/.test(text))));
+  const c = [...res.cases].reverse().find(contains) ?? res.root;
+  const stages = c?.stages ?? [];
   return {
-    roles: res.cases.flatMap((c) => c.lanes.flatMap((lane) => lane.roles)),
-    clearances: res.cases.flatMap((c) => c.lanes.flatMap((lane) => lane.clearance)),
-    caseFiles: [...new Set(res.cases.flatMap((c) => c.caseFiles.map((file) => file.name)))],
-    lanes: [...new Set(res.cases.flatMap((c) => c.lanes.map((l) => l.name)))],
-    milestones: [...new Set(res.cases.flatMap((c) => c.stages.map((s) => s.milestone)))],
+    roles: c?.lanes.flatMap((lane) => lane.roles),
+    clearances: c?.lanes.flatMap((lane) => lane.clearance),
+    caseFiles: c?.caseFiles.map((file) => file.name),
+    lanes: c?.lanes.map((lane) => lane.name) ?? [],
+    approvers: c?.lanes.filter((lane) => lane.roles.some((role) => /HITM|APPROVER/i.test(role))).map((lane) => lane.name),
+    milestones: [...new Set(stages.map((item) => item.milestone))],
+    stages,
+    stage: stages.find(contains),
   };
 }
 
@@ -22,20 +31,59 @@ export function contextFrom(res: CompileResult): SuggestContext {
 interface Ghost {
   pos: number;
   text: string;
+  draft?: IntentDraft;
 }
 const setGhost = StateEffect.define<Ghost | null>();
+const ignoreDraft = StateEffect.define<number>();
+const dismissedDraft = StateField.define<number | null>({
+  create: () => null,
+  update(value, transaction) {
+    for (const effect of transaction.effects) if (effect.is(ignoreDraft)) return effect.value;
+    return transaction.docChanged ? null : value;
+  },
+});
+
+export function showIntentDraft(view: EditorView, draft: IntentDraft) {
+  view.dispatch({ effects: setGhost.of({ pos: view.state.doc.line(draft.line).to, text: draft.text, draft }) });
+}
+
+export const currentDraft = (state: EditorState) => state.field(ghostField, false)?.draft ?? null;
+
+export function acceptIntentDraft(view: EditorView) {
+  const draft = currentDraft(view.state);
+  if (!draft) return false;
+  const source = view.state.doc.toString();
+  let from = 0;
+  while (from < source.length && source[from] === draft.source[from]) from++;
+  let end = source.length, nextEnd = draft.source.length;
+  while (end > from && nextEnd > from && source[end - 1] === draft.source[nextEnd - 1]) {
+    end--;
+    nextEnd--;
+  }
+  view.dispatch({ changes: { from, to: end, insert: draft.source.slice(from, nextEnd) }, selection: { anchor: nextEnd },
+    scrollIntoView: true, effects: setGhost.of(null), userEvent: "input.complete" });
+  return true;
+}
+
+export function dismissIntentDraft(view: EditorView) {
+  const draft = currentDraft(view.state);
+  if (!draft) return false;
+  view.dispatch({ effects: [setGhost.of(null), ignoreDraft.of(draft.line)] });
+  return true;
+}
 
 class GhostWidget extends WidgetType {
-  constructor(readonly text: string) {
+  constructor(readonly text: string, readonly rewrite: boolean = false) {
     super();
   }
   eq(o: GhostWidget) {
-    return o.text === this.text;
+    return o.text === this.text && o.rewrite === this.rewrite;
   }
   toDOM() {
     const span = document.createElement("span");
-    span.className = "cm-ghost";
+    span.className = this.rewrite ? "cm-ghost cm-ghost-rewrite" : "cm-ghost";
     span.textContent = this.text;
+    span.setAttribute("aria-hidden", "true");
     const hint = document.createElement("span");
     hint.className = "cm-ghost-hint";
     hint.textContent = "Tab";
@@ -54,8 +102,15 @@ const ghostField = StateField.define<Ghost | null>({
     if (tr.docChanged || tr.selection) return null;
     return v;
   },
-  provide: (f) =>
-    EditorView.decorations.from(f, (g) => (g ? Decoration.set([Decoration.widget({ widget: new GhostWidget(g.text), side: 1 }).range(g.pos)]) : Decoration.none)),
+  provide: (field) => EditorView.decorations.compute([field], (state) => {
+    const g = state.field(field);
+    if (!g) return Decoration.none;
+    const widget = new GhostWidget(g.text, !!g.draft);
+    if (!g.draft || g.draft.append) return Decoration.set([Decoration.widget({ widget, side: 1 }).range(g.pos)]);
+    const line = state.doc.line(g.draft.line);
+    const start = line.from + indentOf(line.text);
+    return Decoration.set([start === line.to ? Decoration.widget({ widget, side: 1 }).range(start) : Decoration.replace({ widget }).range(start, line.to)]);
+  }),
 });
 
 export function ghostText(getCompiled: (s: EditorState) => CompileResult): Extension[] {
@@ -73,12 +128,21 @@ export function ghostText(getCompiled: (s: EditorState) => CompileResult): Exten
         const v = this.view;
         const st = v.state;
         const sel = st.selection.main;
+        if (currentDraft(st)) return;
         if (!sel.empty || !v.hasFocus) {
           if (st.field(ghostField)) v.dispatch({ effects: setGhost.of(null) });
           return;
         }
         const line = st.doc.lineAt(sel.head);
-        let text = suggestContinuation(st.doc.toString(), sel.head, contextFrom(getCompiled(st)));
+        const source = st.doc.toString();
+        if (sel.head === line.to && st.field(dismissedDraft) !== line.number && /^\s*(?:(?:hey|please|can you|could you)[,!]?\s+)*(?:add|create|insert|start|set|escalate|route)\s+/i.test(line.text)) {
+          const draft = draftIntent(source, line.number);
+          if (draft) {
+            showIntentDraft(v, draft);
+            return;
+          }
+        }
+        let text = suggestContinuation(source, sel.head, contextFrom(getCompiled(st), line.number, source.split("\n")));
         if (text) text = indentSuggestion(text, line.text.length - line.text.trimStart().length);
         const cur = st.field(ghostField);
         if ((cur?.text ?? null) === text && cur?.pos === sel.head) return;
@@ -90,6 +154,7 @@ export function ghostText(getCompiled: (s: EditorState) => CompileResult): Exten
     },
   );
   const accept = (view: EditorView) => {
+    if (acceptIntentDraft(view)) return true;
     if (completionStatus(view.state) === "active") return acceptCompletion(view);
     const g = view.state.field(ghostField, false);
     if (!g) return false;
@@ -98,27 +163,37 @@ export function ghostText(getCompiled: (s: EditorState) => CompileResult): Exten
   };
   const acceptWord = (view: EditorView) => {
     const g = view.state.field(ghostField, false);
-    if (!g) return false;
+    if (!g || g.draft) return false;
     const m = /^\s*\S+/.exec(g.text);
     const chunk = m ? m[0] : g.text;
     view.dispatch({ changes: { from: g.pos, insert: chunk }, selection: { anchor: g.pos + chunk.length }, effects: setGhost.of(null) });
     return true;
   };
   const dismiss = (view: EditorView) => {
+    if (dismissIntentDraft(view)) return true;
     if (!view.state.field(ghostField, false)) return false;
     view.dispatch({ effects: setGhost.of(null) });
     return true;
   };
   return [
     ghostField,
+    dismissedDraft,
     plugin,
     Prec.highest(keymap.of([{ key: "Tab", run: accept }, { key: "Mod-ArrowRight", run: acceptWord }, { key: "Escape", run: dismiss }])),
   ];
 }
 
 // ------------------------------------------------------------------ ▾ dropdowns
-/** When set, the next completion request lists every option (no filtering). */
-export const showAllOptions = { next: false };
+const unfiltered = new WeakSet<EditorView>();
+
+export function openOptions(view: EditorView) {
+  unfiltered.add(view);
+  if (!startCompletion(view)) unfiltered.delete(view);
+}
+
+export function takeUnfilteredOptions(view: EditorView | undefined): boolean {
+  return view ? unfiltered.delete(view) : false;
+}
 
 class DropWidget extends WidgetType {
   constructor(readonly cursor: number, readonly label: string) {
@@ -138,8 +213,7 @@ class DropWidget extends WidgetType {
     b.onclick = () => {
       view.focus();
       view.dispatch({ selection: { anchor: this.cursor } });
-      showAllOptions.next = true;
-      startCompletion(view);
+      openOptions(view);
     };
     return b;
   }
@@ -153,7 +227,7 @@ const KV_RE = /^(\s*)(-\s+)?([^:"'[{#\s][^:]*?):(?:\s*(.*))$/;
 export function dropdowns(getCompiled: (s: EditorState) => CompileResult): Extension {
   const build = (view: EditorView): DecorationSet => {
     const st = view.state;
-    const ctx = contextFrom(getCompiled(st));
+    const compiled = getCompiled(st);
     const lines = st.doc.toString().split("\n");
     const out = [];
     for (const { from, to } of view.visibleRanges) {
@@ -162,9 +236,10 @@ export function dropdowns(getCompiled: (s: EditorState) => CompileResult): Exten
         const line = st.doc.lineAt(pos);
         const m = KV_RE.exec(line.text);
         if (m) {
+          const ctx = contextFrom(compiled, line.number, lines);
           const anc = ancestorsAt(lines, line.number - 1, m[1].length);
           const key = m[3];
-          const list = listOptions(key, ctx).length > 0 || /(?:curation)/i.test(translateKey(key));
+          const list = listOptions(key, ctx).length > 0 || /^(?:curation)$/i.test(translateKey(key));
           const close = list ? line.text.lastIndexOf("]") : -1;
           const cursor = close >= 0 ? line.from + close : line.to;
           const component = anc[0] === "config" && m[4].startsWith("{") ? componentSpec(key) : undefined;

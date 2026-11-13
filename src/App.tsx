@@ -159,7 +159,7 @@ export default function App() {
               </div>
             </div>
             <div style={{ maxWidth: 560 }}>
-              Demos on this site run entirely in your browser: uploaded documents, indexes and the audit ledger never leave your device.
+              The RAG Sandbox keeps uploaded documents, indexes, and its audit ledger in your browser.
               Regulatory mappings describe design intent and are not legal advice or a certification.
             </div>
           </div>

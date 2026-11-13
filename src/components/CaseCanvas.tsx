@@ -28,6 +28,7 @@ interface Props {
   run?: CanvasRun | null;
   height?: number | string;
   compact?: boolean;
+  outline?: boolean;
 }
 
 const R = 23;
@@ -46,7 +47,7 @@ function edgePath(a: { x: number; y: number }, b: { x: number; y: number }) {
   return `M${x1},${a.y} C${x1 + dx},${a.y} ${x2 - dx},${b.y} ${x2},${b.y}`;
 }
 
-export function CaseCanvas({ ast, editable, highlightLines, onSelectLines, onEdit, onPalette, onRemove, run, height = 460, compact }: Props) {
+export function CaseCanvas({ ast, editable, highlightLines, onSelectLines, onEdit, onPalette, onRemove, run, height = 460, compact, outline }: Props) {
   const graph = useMemo(() => deriveGraph(ast), [ast]);
   const [width, setWidth] = useState(800);
   const colW = compact ? 118 : 132;
@@ -189,11 +190,25 @@ export function CaseCanvas({ ast, editable, highlightLines, onSelectLines, onEdi
   }, [ast, q]);
 
   const applyPalette = (p: PaletteItem) => (onPalette ? onPalette(p.label, p.apply) : onEdit?.(p.apply));
+  const outlineItems = [
+    ...ast.lanes.map((lane) => ({ label: lane.name, detail: lane.roles.join(", "), line: lane.line })),
+    ...ast.stages.map((stage) => ({ label: `Stage ${stage.idx} · ${stage.name}`, detail: stage.when, line: stage.line })),
+    ...ast.rules.filter((rule) => !rule.inherited).map((rule) => ({ label: `Rule · ${rule.milestone}`, detail: rule.raw, line: rule.line })),
+    ...ast.constraints.map((constraint) => ({ label: constraint.facet, detail: constraint.text, line: constraint.line })),
+  ];
 
   return (
     <div className={`cv-wrap${editable ? " cv-editable" : ""}`} style={{ height }}>
-      {editable && (
+      {(editable || (outline && outlineItems.length > 0)) && (
         <aside className="cv-palette" aria-label="Widget palette">
+          {outline && outlineItems.length > 0 && <details className="cv-outline" open>
+            <summary>Workflow outline</summary>
+            {outlineItems.map(({ label, detail, line }) => (
+              <button type="button" key={label + line} className={`cv-pitem${hl.has(line) ? " cv-outline-active" : ""}`} title={detail}
+                disabled={!onSelectLines} onClick={() => onSelectLines?.([line])}>{label}</button>
+            ))}
+          </details>}
+          {editable && <>
           <input
             className="cv-search"
             type="search"
@@ -232,6 +247,7 @@ export function CaseCanvas({ ast, editable, highlightLines, onSelectLines, onEdi
             </div>
           ))}
           {!groups.length && <div className="muted" style={{ fontSize: 12, padding: 4 }}>{q ? "No widget matches." : "Every widget is already in this case."}</div>}
+          </>}
         </aside>
       )}
       <div

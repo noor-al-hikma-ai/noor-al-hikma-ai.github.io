@@ -70,6 +70,11 @@
 }
 
 .cv-search { width: 100%; font-size: 12.5px; padding: 6px 8px; margin-bottom: 8px; border-radius: 8px; }
+.cv-outline { max-height: 42%; overflow: auto; margin-bottom: 10px; border-bottom: 1px solid var(--rule); font-size: 12px; }
+.cv-outline summary { font-weight: 650; cursor: pointer; padding: 4px; }
+.cv-outline .cv-pitem { cursor: pointer; overflow-wrap: anywhere; }
+.cv-outline .cv-pitem:disabled { opacity: 1; cursor: default; }
+.cv-outline .cv-outline-active { background: var(--emerald-pastel); }
 
 /* Config inspector */
 .ci {
