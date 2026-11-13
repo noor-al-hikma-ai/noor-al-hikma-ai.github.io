@@ -60,6 +60,10 @@ function caseContainer(tree: SpecNode[], c: CaseAST): Container {
   return { nodes: item.children, indent: childIndent(item), endLine: item.endLine };
 }
 
+export function caseSections(src: string, c: CaseAST): Set<string> {
+  return new Set(caseContainer(treeOf(src), c).nodes.map((node) => normKey(node.key)));
+}
+
 export type AuthoringTarget = "section" | "lane" | "stage" | "rule" | "escalation" | "gateway" | "constraint" | "proposal";
 export interface AuthoringSlot {
   line: number;
@@ -212,16 +216,8 @@ export function addStep(src: string, c: CaseAST, text: string, stageIdx?: number
 }
 
 export function addRule(src: string, c: CaseAST, ruleText: string): string {
-  const tree = treeOf(src);
-  if (c.rulesLine) {
-    const rules = findNode(tree, c.rulesLine);
-    if (rules) return insertAfter(src, rules.endLine, [" ".repeat(childIndent(rules)) + "- " + ruleText]);
-  }
-  const cont = caseContainer(tree, c);
-  const anchor = cont.nodes.find((n) => ["cost & traffic guards", "process flow", "subcases"].includes(normKey(n.key)));
-  const ind = cont.indent;
-  const block = [" ".repeat(ind) + "Binding Lean Contract:", " ".repeat(ind + 2) + "Rules (SBVR & FEEL Constrained English):", " ".repeat(ind + 4) + "- " + ruleText, ""];
-  return anchor ? insertAfter(src, anchor.line - 1, block) : insertAfter(src, cont.endLine, ["", ...block]);
+  const slot = authoringSlot(src, c, "rule");
+  return slot ? insertAuthoring(src, slot, ["- " + ruleText]) : src;
 }
 
 export function addGuard(src: string, c: CaseAST, key: string, value: string): string {

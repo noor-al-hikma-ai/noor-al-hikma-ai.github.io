@@ -5,6 +5,8 @@ import { CopilotPanel } from "../components/CopilotPanel";
 import { SketchWorkflow } from "../components/SketchWorkflow";
 import { caseSpineLanguage } from "../lib/casespine/language";
 import { openOptions } from "../lib/casespine/assist";
+import { continuationOptions, continuationSizes, type Continuation } from "../lib/casespine/continuations";
+import { requestLiveModel } from "../lib/liveModel";
 import { emitAll } from "../lib/casespine/emit";
 import { buildCsar } from "../lib/casespine/csar";
 import { authoringSlot, changedLines, removeRange, type AuthoringTarget } from "../lib/casespine/edits";
@@ -16,6 +18,7 @@ import { getSpec, setSpec, useSpec } from "../store";
 import "./studio.css";
 
 const language = caseSpineLanguage();
+const nextStepEndpoint = import.meta.env.VITE_CASESPINE_NEXT_STEP_ENDPOINT?.trim();
 
 function download(name: string, bytes: Uint8Array | string, type = "application/octet-stream") {
   const blob = new Blob([bytes as BlobPart], { type });
@@ -36,6 +39,8 @@ export default function Studio() {
   const { spec, compiled } = useSpec();
   const [cursorLine, setCursorLine] = useState<number | null>(null);
   const [draft, setDraft] = useState<IntentDraft | null>(null);
+  const [nextSteps, setNextSteps] = useState<{ source: string; options: Continuation[]; pending: boolean; recommended?: string; local?: boolean } | null>(null);
+  const nextRequest = useRef(0);
   const [sketch, setSketch] = useState(false);
   const [editorHl, setEditorHl] = useState<number[]>([]);
   const [tab, setTab] = useState("lean");
@@ -56,14 +61,33 @@ export default function Studio() {
   const withStages = compiled.cases.filter((c) => c.stages.length);
   const focus: CaseAST | undefined = compiled.cases.find((c) => c.namespacePath === focusNs) ?? withStages[0] ?? compiled.root ?? undefined;
   const visual = draft ? draft.compiled.cases.find((c) => c.namespacePath === focus?.namespacePath) ?? draft.compiled.root : focus;
-  const targets = useMemo(() => emitAll(compiled, focus), [compiled, focus]);
-
-  const csar = useMemo(() => tab === "csar" && compiled.root ? buildCsar(compiled) : null, [tab, compiled]);
   const errors = compiled.diagnostics.filter((d) => d.severity === "error");
+  const canBuild = !!compiled.root && !errors.length;
+  const targets = useMemo(() => canBuild ? emitAll(compiled, focus) : [], [canBuild, compiled, focus]);
+  const csar = useMemo(() => tab === "csar" && canBuild ? buildCsar(compiled) : null, [tab, canBuild, compiled]);
   const warnings = compiled.diagnostics.filter((d) => d.severity === "warning").length;
   const rules = compiled.cases.reduce((a, c) => a + c.rules.filter((r) => !r.inherited).length, 0);
   const current = targets.find((t) => t.id === tab);
   const exampleId = EXAMPLES.find((e) => e.src === spec)?.id ?? "";
+  const suggestions = nextSteps?.source === spec ? nextSteps : null;
+
+  async function suggestNextStep() {
+    const request = ++nextRequest.current;
+    const { spec: source, compiled: result } = getSpec();
+    const lines = source.split("\n");
+    const line = Math.min(cursorLine ?? lines.length, lines.length);
+    const { level, options } = continuationOptions(source, line, result);
+    setNextSteps({ source, options, pending: !!nextStepEndpoint && options.length > 1 });
+    if (!nextStepEndpoint || options.length <= 1) return;
+    const reply = await requestLiveModel(nextStepEndpoint, {
+      context: { position: level, state: result.diagnostics.some((item) => item.severity === "error") ? "needs-repair" : "ready" },
+      options: options.map(({ id, label, size }) => ({ id, label, size })),
+    });
+    if (request !== nextRequest.current || getSpec().spec !== source) return;
+    const choice = reply && typeof reply === "object" && "choice" in reply ? reply.choice : undefined;
+    const recommended = options.find((option) => option.id === choice)?.id;
+    setNextSteps({ source, options, pending: false, recommended, local: !recommended });
+  }
 
   function suggest(target: AuthoringTarget) {
     if (!focus) {
@@ -191,7 +215,7 @@ export default function Studio() {
       {coach && (
         <div className="coach fade-up" role="note">
           <b>New here?</b> Click <b>✨ Start from plain words</b> and describe your case — or put the cursor at the end of any line in the editor and press
-          <span className="kbd">Tab</span> to accept the grey suggestion. Hover any value for alternatives, click ▾ for a dropdown, click a widget to configure it.
+          <span className="kbd">Tab</span> or <span className="kbd">→</span> to accept the grey suggestion. Hover any value for alternatives, click ▾ for a dropdown, click a widget to configure it.
           <button className="btn btn-ghost btn-sm" onClick={dismissCoach}>Got it</button>
         </div>
       )}
@@ -206,7 +230,7 @@ export default function Studio() {
             <span className={`chip ${compiled.language === "ar" ? "gold" : ""}`}>{compiled.language === "ar" ? "العربية → canonical IR" : "English"}</span>
             {warnings > 0 && <button className="chip" style={{ color: "var(--warn)", cursor: "pointer" }} onClick={() => setTab("diag")}>{warnings} warning{warnings > 1 ? "s" : ""}</button>}
         <span className="muted studio-keys">
-          <span className="kbd">Tab</span> accept suggestion · <span className="kbd">Ctrl</span>+<span className="kbd">Space</span> options · <span className="kbd">⌘</span>+<span className="kbd">Enter</span> compile
+          <span className="kbd">Tab</span> or <span className="kbd">→</span> accept · <span className="kbd">Ctrl</span>+<span className="kbd">Space</span> options · <span className="kbd">⌘</span>+<span className="kbd">Enter</span> compile
         </span>
       </div>
 
@@ -220,6 +244,10 @@ export default function Studio() {
               setEditorHl([]);
             }} disabled={!spec}>Start blank</button>
             <button className="btn btn-ghost btn-sm" onClick={() => suggest("section")}>{spec ? "Add section" : "Suggest first line"}</button>
+            <button className="btn btn-ghost btn-sm" aria-expanded={!!suggestions} onClick={() => {
+              if (suggestions) { nextRequest.current++; setNextSteps(null); }
+              else void suggestNextStep();
+            }}>Suggest next step</button>
             <button className="btn btn-ghost btn-sm" onClick={() => { setSpec(EXAMPLES[0].src); toast("Reset to the reference example", "info"); }} title="Restore the reference example">
               Reset
             </button>
@@ -235,6 +263,17 @@ export default function Studio() {
           {!spec && <p className="muted" style={{ margin: "8px 12px" }}>
             Choose Suggest first line to name your case. Then use the editor buttons or press Tab to build your workflow.
           </p>}
+          {suggestions && <div className="studio-next-steps" aria-label="Next step options">
+            <small className="muted" role="status">{suggestions.pending ? "Finding a recommendation…" : suggestions.recommended ? "Model recommendation available" : suggestions.local ? "Local suggestions" : ""}</small>
+            {suggestions.options.length ? suggestions.options.map((option) => <button key={option.id}
+              className={`btn btn-sm ${option.id === suggestions.recommended ? "btn-emerald" : "btn-ghost"}`}
+              title={continuationSizes[option.size]} onClick={() => {
+                nextRequest.current++;
+                setNextSteps(null);
+                editorCommands.current?.previewDraft(option.draft);
+              }}>{option.label}{option.id === suggestions.recommended ? " · Recommended" : ""}</button>)
+              : <small>Use the editor suggestions at your cursor or choose Add section.</small>}
+          </div>}
           <div style={{ flex: 1, minHeight: 0 }}>
             <CodeEditor commands={editorCommands} value={spec} onChange={setSpec} onCursorLine={setCursorLine} onDraft={setDraft} highlight={editorHl} language={language} />
           </div>
@@ -242,7 +281,7 @@ export default function Studio() {
 
         <section className="panel studio-canvas" aria-label="Visual program">
           <div className="panel-head">
-            <span className="label">{draft ? "Suggested workflow" : "Visual · click a widget to configure"}</span>
+            <span className="label">{draft ? draft.heading ?? "Suggested workflow" : "Visual · click a widget to configure"}</span>
             {draft && <>
               {draft.localFallback && <small className="muted" role="status">Live model unavailable. Local draft.</small>}
               <button className="btn btn-emerald btn-sm" onClick={() => editorCommands.current?.acceptDraft()}>Accept draft</button>
@@ -318,6 +357,7 @@ export default function Studio() {
           </div>
           <div style={{ flex: 1, minHeight: 0, overflow: "auto" }} key={tab + compiled.ms}>
             {current && <pre className="code-out fade-up">{current.code}</pre>}
+            {!canBuild && tab !== "diag" && <p className="panel-body muted">Resolve the source errors to generate the compiled outputs.</p>}
             {tab === "csar" && csar && (
               <div className="panel-body">
                 <p style={{ marginTop: 0, fontSize: 14 }}>

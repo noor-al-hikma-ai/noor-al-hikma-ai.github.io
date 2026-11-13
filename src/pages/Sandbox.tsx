@@ -52,7 +52,8 @@ const fmtUsd = (x: number) => (x < 0.01 ? `$${x.toFixed(4)}` : `$${x.toFixed(2)}
 
 export default function Sandbox() {
   const { compiled } = useSpec();
-  const cases = compiled.cases.filter((c) => c.stages.length || c.caseFiles.length);
+  const invalid = compiled.diagnostics.some((d) => d.severity === "error");
+  const cases = invalid ? [] : compiled.cases.filter((c) => c.stages.length || c.caseFiles.length);
   const [ns, setNs] = useState<string | null>(null);
   const c: CaseAST | undefined = cases.find((x) => x.namespacePath === ns) ?? cases.find((x) => x.stages.length) ?? cases[0];
 
@@ -272,7 +273,7 @@ export default function Sandbox() {
     return (
       <div className="paper">
         <h1>RAG Sandbox</h1>
-        <p>The current Studio spec has no case with a Case File or Process Flow. <a href="#/studio">Open the Studio</a> and load an example.</p>
+        <p>{invalid ? "Resolve the source errors before running this case. " : "Add a Case File or Process Flow before running this case. "}<a href="#/studio">Open Studio</a></p>
       </div>
     );
 

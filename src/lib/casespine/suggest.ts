@@ -17,6 +17,7 @@ export interface SuggestContext {
   approvers?: string[];
   stages?: { idx: number; milestone: string; line: number }[];
   stage?: { idx: number; milestone: string; line: number };
+  subcaseBudget?: { tokens: number; usd: number };
 }
 
 const AR_TO_EN = new Map(Object.entries(AR_KEYS));
@@ -47,9 +48,9 @@ export function ancestorsAt(lines: string[], lineIdx: number, indent: number): s
   return out;
 }
 
-/** Keys already present among the siblings at `indent` around `lineIdx`. */
-export function siblingKeys(lines: string[], lineIdx: number, indent: number): Set<string> {
-  const keys = new Set<string>();
+/** Sibling field locations on either side of the cursor, nearest first. */
+export function siblingKeyLines(lines: string[], lineIdx: number, indent: number): Map<string, number> {
+  const keys = new Map<string, number>();
   const scan = (from: number, step: number) => {
     for (let n = from; n >= 0 && n < lines.length; n += step) {
       const t = lines[n];
@@ -58,13 +59,17 @@ export function siblingKeys(lines: string[], lineIdx: number, indent: number): S
       if (ind < indent) break;
       if (ind === indent) {
         const m = KEY_RE.exec(t);
-        if (m) keys.add(keywordId(m[3]));
+        if (m && !keys.has(keywordId(m[3]))) keys.set(keywordId(m[3]), n);
       }
     }
   };
   scan(lineIdx - 1, -1);
   scan(lineIdx + 1, 1);
   return keys;
+}
+
+export function siblingKeys(lines: string[], lineIdx: number, indent: number): Set<string> {
+  return new Set(siblingKeyLines(lines, lineIdx, indent).keys());
 }
 
 export type Level =
@@ -172,7 +177,7 @@ export function sectionBlock(key: string, ctx: SuggestContext): string[] | null 
     case "actuators":
       return [`  Orchestrator: ${ACTUATOR_FIELDS[0].example}`];
     case "subcases":
-      return subcaseBlock().map((line) => "  " + line);
+      return subcaseBlock(ctx).map((line) => "  " + line);
     case "ai smart suggestions":
       return ["  " + proposalText(ctx)];
     default:
@@ -190,6 +195,11 @@ export function canSeedBlock(lines: string[], lineIdx: number, indent: number): 
   return true;
 }
 
+export function hasFollowingChildren(lines: string[], lineIdx: number, indent: number) {
+  const following = lines.slice(lineIdx + 1).find((line) => line.trim() && !/^\s*#/.test(line));
+  return !!following && indentOf(following) > indent;
+}
+
 export function stageBlock(ctx: SuggestContext, previous: string | null | undefined = ctx.stages?.at(-1)?.milestone): string[] {
   const n = Math.max(0, ...(ctx.stages ?? []).map((stage) => stage.idx)) + 1;
   const existing = new Set(ctx.stages?.map((stage) => stage.milestone));
@@ -205,7 +215,10 @@ export function stageBlock(ctx: SuggestContext, previous: string | null | undefi
   ];
 }
 
-export const subcaseBlock = () => ["- Subcase: Additional Review", "  Budget Ceiling: 1000 tokens or $0.05"];
+export function subcaseBlock(ctx: SuggestContext, name = "Additional Review"): string[] {
+  const { tokens, usd } = ctx.subcaseBudget ?? { tokens: 1000, usd: 0.05 };
+  return [`- Subcase: ${name}`, `  Budget Ceiling: ${Math.min(1000, tokens)} tokens or $${Math.min(0.05, usd).toFixed(2)}`];
+}
 export const proposalText = (ctx: SuggestContext) =>
   `- Suggest policy_review: "Identify policy changes for the next review" (Moderated by: ${approver(ctx)})`;
 
@@ -262,6 +275,73 @@ export function keysFor(lvl: Level, anc: string[]): string[] {
   return KEYWORDS.filter((entry) => entry.level === lvl || (lvl === "stage" && entry.level === "breach")).map((entry) => entry.key);
 }
 
+const KEY_ALIASES: Record<string, string[]> = {
+  lanes: ["lane"],
+  "case file": ["case files", "documents"],
+  "process flow": ["workflow", "work flow", "process", "stages"],
+  "binding lean contract": ["lean contract", "contract"],
+  "business & product constraints": ["constraints", "business constraints", "product constraints", "business and product constraints"],
+  "cost & traffic guards": ["guards", "cost and traffic guards"],
+  config: ["configuration", "settings"],
+  rules: ["rule"],
+  steps: ["step"],
+  roles: ["role"],
+  "sso provider": ["sso"],
+  "reach milestone": ["milestone"],
+  "escalate to": ["escalation"],
+};
+
+const keyWords = (key: string) => key.normalize("NFC").trim().toLowerCase().replace(/\s+/g, " ");
+
+function oneEditAway(a: string, b: string): boolean {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  while (i < a.length && a[i] === b[i]) i++;
+  if (a.length !== b.length) return a.length > b.length ? a.slice(i + 1) === b.slice(i) : b.slice(i + 1) === a.slice(i);
+  return a.slice(i + 1) === b.slice(i + 1)
+    || (a[i] === b[i + 1] && a[i + 1] === b[i] && a.slice(i + 2) === b.slice(i + 2));
+}
+
+export interface KeywordMatch {
+  key: string;
+  label: string;
+  kind: "exact" | "prefix" | "correction";
+  question?: boolean;
+}
+
+/** Match keywords at a word boundary. A typo must be close to the whole keyword. */
+export function matchKeywords(level: Level, ancestors: string[], text: string): KeywordMatch[] {
+  const original = keyWords(text);
+  const query = original.replace(/^(?:what (?:is|are)|do (?:i|we) need|where (?:do (?:i|we)|to) (?:add|define|put))\s+(?:the\s+)?/, "")
+    .replace(/\s+(?:or what|goes here)\s*\??$/, "").replace(/\?+$/, "").trim();
+  if (!query || query.length > 100) return [];
+  const question = query !== original;
+  const arabic = hasArabic(query);
+  const matches = keysFor(level, ancestors).flatMap((key) => {
+    const translation = KEYWORDS.find((word) => word.key === key && (word.level === level || level === "stage" && word.level === "breach"))?.ar;
+    const label = arabic && translation ? translation : key;
+    const phrase = keyWords(label);
+    const short = keyWords(label.replace(/\s+\([^)]*\)$/, ""));
+    const aliases = KEY_ALIASES[normKey(key)] ?? [];
+    const exact = query === phrase || query === short;
+    const prefix = phrase.startsWith(query);
+    const alias = aliases.includes(query);
+    const typo = query.length >= 4 && oneEditAway(query, short);
+    if (exact || prefix || alias || typo) {
+      const kind: KeywordMatch["kind"] = exact ? "exact" : alias || !prefix ? "correction" : "prefix";
+      return [{ key, label, kind, question, rank: exact ? 0 : alias ? 1 : prefix ? 2 : 3 }];
+    }
+    return [];
+  });
+  return matches.sort((a, b) => a.rank - b.rank);
+}
+
+export function keywordBeforeColon(text: string) {
+  const content = text.trimStart().replace(/^-\s+/, "");
+  const colon = content.indexOf(":");
+  return { query: (colon < 0 ? content : content.slice(0, colon)).trim(), value: colon < 0 ? undefined : content.slice(colon + 1).trim() };
+}
+
 export function keyLine(key: string, lvl: Level, anc: string[], ctx: SuggestContext): string {
   const block = sectionBlock(key, ctx);
   if (block && lvl !== "config") return ":\n" + block.join("\n");
@@ -297,7 +377,6 @@ export function suggestContinuation(doc: string, pos: number, ctx: SuggestContex
   const indent = indentOf(prefix);
   const anc = ancestorsAt(lines, lineIdx, indent);
   const lvl = levelOf(anc);
-  const ar = hasArabic(prefix);
 
   // A block header behaves the same before and after trailing spaces.
   const bare = KEY_RE.exec(prefix);
@@ -338,29 +417,27 @@ export function suggestContinuation(doc: string, pos: number, ctx: SuggestContex
       return t ? t.slice(typed.length) : null;
     }
     if (lvl === "process" || lvl === "subcases" || lvl === "proposals") {
-      const block = lvl === "process" ? stageBlock(ctx) : lvl === "subcases" ? subcaseBlock() : [proposalText(ctx)];
+      if (lvl === "subcases" && ctx.subcaseBudget?.tokens === 0) return null;
+      const block = lvl === "process" ? stageBlock(ctx, ctx.stages?.filter((stage) => stage.line <= lineIdx).at(-1)?.milestone ?? null) : lvl === "subcases" ? subcaseBlock(ctx) : [proposalText(ctx)];
       const full = listItem(block, true);
       // An inline continuation cannot insert a missing list dash before existing text.
       return dash && full.toLowerCase().startsWith(low) ? full.slice(typed.length) || null : null;
     }
     const present = siblingKeys(lines, lineIdx, indent);
-    let candidates = keysFor(lvl, anc).filter((k) => !present.has(normKey(k)) && !present.has(normName(k)));
-    if (ar) candidates = KEYWORDS.filter((k) => k.ar && candidates.includes(k.key)).map((k) => k.ar!);
-    const hit = candidates.find((k) => k.toLowerCase().startsWith(low) && k.length >= typed.length);
+    const hit = matchKeywords(lvl, anc, typed).find(({ key, label }) => !present.has(keywordId(key)) && label.toLowerCase().startsWith(low));
     if (!hit) return null;
-    return hit.slice(typed.length) + keyLine(ar ? translateKey(hit) : hit, lvl, anc, ctx);
+    return hit.label.slice(typed.length) + keyLine(hit.key, lvl, anc, ctx);
   }
 
   // C. empty line → next most likely line or block
+  if (hasFollowingChildren(lines, lineIdx, indent)) return null;
   const present = siblingKeys(lines, lineIdx, indent);
   const prefixDash = dash ? "" : "- ";
   switch (lvl) {
     case "top": {
       if (!/^\s*(Case|الحالة)\s*:/m.test(doc)) return "Case: My Business Case";
-      if (indent !== 0) return null;
       const order = ["Lanes", "Case File", "Process Flow", "Binding Lean Contract", "Business & Product Constraints", "Cost & Traffic Guards", "Config", "Deployment"];
-      const all = new Set(lines.map((l) => KEY_RE.exec(l)).filter((m) => m && m[1] === "").map((m) => keywordId(m![3])));
-      const next = order.find((k) => !all.has(normKey(k)));
+      const next = order.find((k) => !present.has(normKey(k)));
       return next ? next + ":\n" + sectionBlock(next, ctx)!.join("\n") : null;
     }
     case "rules": {
@@ -374,9 +451,9 @@ export function suggestContinuation(doc: string, pos: number, ctx: SuggestContex
       return t ? prefixDash + t : null;
     }
     case "process":
-      return listItem(stageBlock(ctx), dash);
+      return listItem(stageBlock(ctx, ctx.stages?.filter((stage) => stage.line <= lineIdx).at(-1)?.milestone ?? null), dash);
     case "subcases":
-      return present.has("subcase") ? null : listItem(subcaseBlock(), dash);
+      return ctx.subcaseBudget?.tokens === 0 ? null : listItem(subcaseBlock(ctx), dash);
     case "proposals":
       return present.has("suggest policy_review") ? null : listItem([proposalText(ctx)], dash);
     case "lane-name":

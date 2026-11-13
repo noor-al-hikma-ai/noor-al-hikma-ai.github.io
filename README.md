@@ -34,12 +34,13 @@ scaffold, and used by the sandbox runtime. Clicking a widget on the canvas edits
 ### Authoring a workflow
 
 In Studio, start blank, name your case, and use the buttons above the editor to add lanes,
-stages, contract rules, escalations, gateways, and constraints. Press Tab to accept grey text or
-Ctrl+Space to see available options. Hover over a highlighted draft fragment to see repairs.
+stages, contract rules, escalations, gateways, and constraints. Press Tab or Right Arrow to accept
+grey text. Use Ctrl+Space for options or hover over a highlighted fragment for repairs.
+**Suggest next step** offers an entry, a complete block, or related blocks based on the case and cursor.
 
 For a guided edit, type `Hey, add the lane with the requirements X, Y, Z`,
 `Add a stage called Screen payments`, or `Set Retriever Top K to 4` in the editor.
-Review the grey rewrite and the updated canvas, then press Tab or choose **Accept draft**.
+Review the grey rewrite and the updated canvas, then press Tab or Right Arrow, or choose **Accept draft**.
 Use **Sketch workflow** on a phone to draw closed stage boxes, name them, and preview the linked stages.
 
 `Business & Product Constraints:` records requirements in the compiled manifest. Put a check in

@@ -12,6 +12,7 @@ export interface IntentDraft {
   source: string;
   compiled: CompileResult;
   append?: boolean;
+  heading?: string;
   localFallback?: boolean;
 }
 

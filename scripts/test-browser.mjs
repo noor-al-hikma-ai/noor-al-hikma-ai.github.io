@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root=resolve(process.argv[2] || 'dist'), baseline=process.argv[3]==='baseline';
 const modelOrigin=process.env.NOOR_MODEL_URL ? new URL(process.env.NOOR_MODEL_URL).origin : null;
+const nextStepEndpoint=process.env.NOOR_TEST_NEXT_STEP_ENDPOINT;
 const mime={'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.css':'text/css','.woff2':'font/woff2','.svg':'image/svg+xml','.pdf':'application/pdf'};
 const server=createServer(async(req,res)=>{
   const path=resolve(root,'.'+new URL(req.url,'http://local').pathname.replace(/\/$/,'/index.html'));
@@ -214,6 +215,83 @@ try {
       await page.keyboard.insertText(text);
       await page.waitForFunction(text => localStorage.getItem('noor.casespine.spec.v1') === text, text);
     };
+    const setFragment = async (fragment, tail = '') => {
+      await replaceSpec('Case: Policy review\n' + fragment + (tail ? '\n' + tail : ''));
+      if (tail) {
+        const line = page.locator('.cm-line').filter({hasText: fragment}).first();
+        await line.click();
+        await editor.press('End');
+      }
+    };
+    const existingLanes = 'Lanes:\n  Branch Compliance Officer:\n    Roles: [HITM_APPROVER]';
+    await setFragment('', existingLanes);
+    await editor.press('ControlOrMeta+Home');
+    await editor.press('ArrowDown');
+    await page.keyboard.type('La', {delay: 80});
+    await page.locator('.cm-ghost').getByText(/Lanes: already on line/).waitFor();
+    await page.locator('.cm-tooltip-autocomplete').getByRole('option',{name:/Use existing Lanes/}).waitFor();
+    assert.equal(await page.locator('.cm-tooltip-autocomplete').getByRole('option',{name:/Population Segment/}).count(),0);
+    await editor.press('ArrowRight');
+    assert.equal(await source(),'Case: Policy review\n\n'+existingLanes);
+
+    for (const fragment of ['Lane:', 'Lanes or what']) {
+      await setFragment(fragment);
+      await page.locator('.cm-ghost-rewrite').getByText(/Lanes:.*Case Owner:/s).waitFor();
+      assert.match(await source(),new RegExp(fragment));
+      await editor.press(fragment === 'Lane:' ? 'ArrowRight' : 'Tab');
+      assert.match(await source(),/\nLanes:\n  Case Owner:\n    SSO Provider: Microsoft Entra ID\n    Roles: \[HITM_APPROVER\]/);
+    }
+    await setFragment('Lane:', existingLanes);
+    await editor.press('Escape');
+    await page.locator('.cs-unfinished').filter({hasText:'Lane:'}).first().hover();
+    await page.getByRole('button',{name:/Use existing Lanes/}).click();
+    assert.equal(await source(),'Case: Policy review\n\n'+existingLanes);
+
+    await setFragment('Lanes: Branch Compliance');
+    await page.locator('.cm-ghost-rewrite').getByText(/Lanes:.*Branch Compliance:/s).waitFor();
+    await editor.press('Tab');
+    assert.match(await source(),/Lanes:\n  Branch Compliance:$/);
+    await setFragment('Porcess Flow:');
+    await page.locator('.cm-ghost-rewrite').getByText(/Stage 1 \(Gather evidence\)/).waitFor();
+    await editor.press('Tab');
+    assert.match(await source(),/Process Flow:\n  - Stage 1/);
+    await replaceSpec('Case: Policy review\nConfig:\n  Retriever:\n    Tp K: 4');
+    await page.locator('.cm-ghost-rewrite').getByText('Top K: 4',{exact:false}).waitFor();
+    await editor.press('ArrowRight');
+    assert.match(await source(),/Top K: 4$/);
+    await replaceSpec('Case: Policy review\nLane:\n  Compliance:\n    Roles: [HITM_APPROVER]');
+    await page.getByRole('button',{name:/^▶ Compile/}).click();
+    await page.getByRole('tab',{name:/Diagnostics/}).getAttribute('aria-selected').then(selected=>assert.equal(selected,'true'));
+    assert.equal(await page.getByRole('button',{name:/⬇ .csar/}).isDisabled(),true);
+    await go('#/sandbox');
+    await page.getByText(/Resolve the source errors before running this case/).waitFor();
+    await go('#/studio');
+    await replaceSpec('Case: Policy review');
+    const recommendation = nextStepEndpoint ? page.waitForResponse((response) => response.url() === nextStepEndpoint && response.request().method() === 'POST') : null;
+    await page.getByRole('button',{name:'Suggest next step',exact:true}).click();
+    if (recommendation) {
+      const response = await recommendation;
+      assert.equal(response.status(), 200);
+      const { choice } = await response.json();
+      assert.equal(typeof choice, 'string');
+      const sent = response.request().postDataJSON();
+      assert.deepEqual(Object.keys(sent).sort(), ['context', 'options']);
+      assert.deepEqual(sent.context, { position: 'top', state: 'ready' });
+      assert.ok(sent.options.some(option => option.id === choice));
+      assert.doesNotMatch(JSON.stringify(sent), /Policy review/);
+      await page.getByText('Model recommendation available').waitFor();
+      await page.getByRole('button',{name:/ · Recommended$/}).waitFor();
+      checks.push('real contextual model recommendation returns an offered edit and receives no case source');
+    }
+    await page.getByRole('button',{name:/Set up the missing workflow blocks/}).click();
+    await page.locator('.cm-ghost-rewrite').getByText(/Lanes:.*Case File:.*Process Flow:/s).waitFor();
+    assert.equal(await source(),'Case: Policy review');
+    await editor.press('ArrowRight');
+    assert.match(await source(),/Lanes:[\s\S]*Case File:[\s\S]*Process Flow:/);
+    await page.getByRole('button',{name:/^▶ Compile/}).click();
+    await page.getByText(/Compiled · 1 case/).waitFor();
+    checks.push('contextual keyword ranking, in-place fixes, existing blocks, strict syntax gating, related block previews, and Tab/Right Arrow');
+
     await replaceSpec('Case: Policy review\nBusiness & Product Constraints: ');
     await page.locator('.cm-ghost').getByText(/Compliance:/).waitFor();
     await editor.press('Tab');

@@ -11,13 +11,13 @@ import type { EditorState, Extension } from "@codemirror/state";
 import { compileSpec } from "./analyze";
 import { classifyStep, KIND_META } from "./graph";
 import { clauseText } from "./rules";
-import { normKey } from "./tree";
+import { buildTree, normKey } from "./tree";
 import { KEYWORDS, PII_ENTITIES, RULE_TEMPLATES, STEP_TEMPLATES } from "./vocab";
 import type { CompileResult } from "./types";
 import { COMPONENTS, componentSpec, fieldSpec, formatValue, inlineDefaults } from "./configSchema";
 import { ancestorsAt, canSeedBlock, indentOf, indentSuggestion, keyLine, keywordId, laneBlock, lastMs, levelOf, listOptions, proposalText, sectionBlock, siblingKeys, stageBlock, subcaseBlock, translateKey, valueOptions, type Level } from "./suggest";
-import { contextFrom, currentDraft, dropdowns, ghostText, openOptions, rtlLines, showIntentDraft, takeUnfilteredOptions } from "./assist";
-import { applyRepair, collectDraftIssues, commentFragment, intentChoices, validatedIntentRepair, type DraftIssue, type Repair } from "./repairs";
+import { contextFrom, currentDraft, dropdowns, ghostText, goToKeyword, openOptions, rtlLines, showIntentDraft, takeUnfilteredOptions, useKeywordHelp } from "./assist";
+import { applyRepair, checkedRepair, collectDraftIssues, commentFragment, intentChoices, keywordHelp, validatedIntentRepair, type DraftIssue, type Repair } from "./repairs";
 import { draftIntent, draftLocalFallback, type IntentDraft } from "./intent";
 import { requestLiveModel } from "../liveModel";
 
@@ -139,6 +139,19 @@ function caseSpineCompletions(ctx: CompletionContext): CompletionResult | null {
   const anc = ancestorsAt(lines, line.number - 1, indent);
   const level = levelOf(anc);
   const tailOfLine = line.text.slice(ctx.pos - line.from);
+
+  if (!tailOfLine.trim() && before.trim()) {
+    const snapshot = lines.join("\n");
+    const suggestions = keywordHelp(lines, line.number, sctx, () => buildTree(res.normalized))
+      .filter(({ repair }) => !repair || checkedRepair(snapshot, res, repair));
+    if (suggestions.length) return {
+      from: line.from + indent, to: line.to, filter: false,
+      options: suggestions.map((suggestion) => ({
+        label: suggestion.label, detail: suggestion.detail, info: suggestion.message,
+        type: "keyword", apply: (view) => useKeywordHelp(view, suggestion, snapshot),
+      })),
+    };
+  }
 
   // Milestone names anywhere after "Milestone "
   const msm = /(Milestone|المعلم)\s+(\w*)$/.exec(before);
@@ -262,7 +275,7 @@ function caseSpineCompletions(ctx: CompletionContext): CompletionResult | null {
     })) };
   }
   if (level === "subcases")
-    return { from, to: line.to, options: [{ label: "Subcase", apply: blockItem(subcaseBlock()), type: "class" }] };
+    return sctx.subcaseBudget?.tokens === 0 ? null : { from, to: line.to, options: [{ label: "Subcase", apply: blockItem(subcaseBlock(sctx)), type: "class" }] };
   if (level === "proposals")
     return { from, to: line.to, options: [{ label: "Suggest policy review", apply: blockItem([proposalText(sctx)]), type: "class" }] };
   if (level === "other") return null;
@@ -286,7 +299,8 @@ function caseSpineCompletions(ctx: CompletionContext): CompletionResult | null {
       ...option, apply: option.label + ": My Business Case",
     })) };
   }
-  return { from, to: line.to, options: opts };
+  const prefix = head[2].trim().toLowerCase();
+  return { from, to: line.to, filter: false, options: prefix && !showAll ? opts.filter((option) => option.label.toLowerCase().startsWith(prefix)) : opts };
 }
 
 // ------------------------------------------------------------------ hover
@@ -427,6 +441,7 @@ function applyEditorRepair(view: EditorView, snapshot: string, repair: Repair) {
     scrollIntoView: true,
     userEvent: "input.complete",
   });
+  if (repair.targetLine) goToKeyword(view, repair.targetLine);
   view.focus();
 }
 
@@ -436,6 +451,10 @@ function draftDiagnostic(state: EditorState, snapshot: string, issue: DraftIssue
     name: repair.label,
     apply: (view: EditorView) => applyEditorRepair(view, snapshot, repair),
   }));
+  if (issue.targetLine && !repairs.length) repairs.push({
+    name: "Go to existing block",
+    apply: (view) => { if (view.state.doc.toString() === snapshot) goToKeyword(view, issue.targetLine!); },
+  });
   if (issue.ambiguous) repairs.push({
     name: "Keep as a # comment",
     apply: (view) => applyEditorRepair(view, snapshot, {
@@ -527,7 +546,7 @@ const lint = linter(
     const out: CMDiagnostic[] = [];
     for (const d of res.diagnostics) {
       if (d.line < 1 || d.line > view.state.doc.lines || d.line === previewLine) continue;
-      if (repairedLines.has(d.line) && d.severity === "error") continue;
+      if (repairedLines.has(d.line)) continue;
       const l = view.state.doc.line(d.line);
       if (!l.text.trim()) continue;
       const start = l.from + (l.text.length - l.text.trimStart().length);

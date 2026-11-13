@@ -160,14 +160,19 @@ for (const ex of EXAMPLES) {
   // Tab inside every example line end must never produce text that breaks compilation.
   for (const ex of EXAMPLES) {
     const lines = ex.src.split("\n");
+    const result = compileSpec(ex.src);
     let pos = 0, broken = 0;
-    for (const l of lines) {
+    for (const [i, l] of lines.entries()) {
       pos += l.length;
-      const sug = suggestContinuation(ex.src, pos, contextFrom(compileSpec(ex.src)));
+      const sug = suggestContinuation(ex.src, pos, contextFrom(result, i + 1, lines));
       if (sug) {
         const ind = l.length - l.trimStart().length;
         const next = ex.src.slice(0, pos) + indentSuggestion(sug, ind) + ex.src.slice(pos);
-        if (compileSpec(next).diagnostics.some((d) => d.severity === "error")) broken++;
+        const errors = compileSpec(next).diagnostics.filter((d) => d.severity === "error");
+        if (errors.length) {
+          broken++;
+          console.log(`  L${i + 1} ${JSON.stringify(l)} → ${JSON.stringify(sug)}: ${errors.map((d) => d.message).join(", ")}`);
+        }
       }
       pos += 1;
     }

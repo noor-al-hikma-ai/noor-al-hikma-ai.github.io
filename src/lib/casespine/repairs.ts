@@ -1,6 +1,6 @@
-import { buildTree, normKey, type SpecNode } from "./tree";
+import { buildTree, normKey, parseKey, type SpecNode } from "./tree";
 import { compileSpec } from "./analyze";
-import { ancestorsAt, indentOf, indentSuggestion, keyLine, keysFor, keywordId, lastMs, levelOf, listOptions, sectionBlock, valueOptions, type SuggestContext } from "./suggest";
+import { ancestorsAt, indentOf, indentSuggestion, keyLine, keywordBeforeColon, keywordId, lastMs, levelOf, listOptions, matchKeywords, sectionBlock, siblingKeyLines, valueOptions, type SuggestContext } from "./suggest";
 import { CONSTRAINT_FACETS, RULE_TEMPLATES } from "./vocab";
 import { fieldSpec, formatValue, validateField } from "./configSchema";
 import type { CompileResult } from "./types";
@@ -15,6 +15,7 @@ interface RepairEdit {
 export interface Repair extends RepairEdit {
   label: string;
   more?: RepairEdit[];
+  targetLine?: number;
 }
 
 export interface DraftIssue {
@@ -24,6 +25,85 @@ export interface DraftIssue {
   message: string;
   repairs: Repair[];
   ambiguous?: boolean;
+  targetLine?: number;
+}
+
+export interface KeywordHelp {
+  label: string;
+  message: string;
+  detail: string;
+  preview: string;
+  repair?: Repair;
+  targetLine?: number;
+  continuation?: string;
+}
+
+function inlineLane(value: string, ctx: SuggestContext): string[] | null {
+  const name = value.replace(/^['"]|['"]$/g, "").trim();
+  if (!/^[\p{L}\p{N}][\p{L}\p{N} &_.()'/-]{0,75}$/u.test(name)) return null;
+  const existing = ctx.lanes.find((lane) => lane.toLowerCase() === name.toLowerCase());
+  return existing ? null : ["  " + name + ":"];
+}
+
+function siblingNode(nodes: SpecNode[], line: number): { node: SpecNode; siblings: SpecNode[] } | undefined {
+  for (const node of nodes) {
+    if (node.line === line) return { node, siblings: nodes };
+    if (node.line < line && line <= node.endLine) return siblingNode(node.children, line);
+  }
+}
+
+/** Shared by hover, the menu, and the inline preview. All edits are opt-in. */
+export function keywordHelp(lines: string[], line: number, ctx: SuggestContext, tree?: () => SpecNode[]): KeywordHelp[] {
+  const text = lines[line - 1];
+  if (!text || /^\s*#/.test(text)) return [];
+  const start = indentOf(text);
+  const ancestors = ancestorsAt(lines, line - 1, start);
+  const level = levelOf(ancestors);
+  const { query, value } = keywordBeforeColon(text);
+  const marker = /^(-\s+)/.exec(text.trimStart())?.[0] ?? "";
+  const parsedKey = parseKey(text.trim().replace(/^-\s+/, ""))?.key;
+  if (parsedKey && value && keywordId(parsedKey) !== "lanes" && matchKeywords(level, ancestors, parsedKey).some((match) => match.kind === "exact" && !match.question)) return [];
+  const matches = matchKeywords(level, ancestors, query);
+  if (!matches.length) return [];
+  const parsed = siblingNode(tree?.() ?? buildTree(lines.join("\n")), line);
+  const children = parsed?.node.children ?? [];
+  const siblings = parsed?.siblings.filter((item) => item.line !== line && item.indent === start) ?? [];
+  const present = siblingKeyLines(lines, line - 1, start);
+  return matches.flatMap(({ key, label, question }): KeywordHelp[] => {
+    const id = keywordId(key);
+    const existing = siblings.find((item) => keywordId(item.key ?? "") === id);
+    const target = existing?.line ?? (present.has(id) ? present.get(id)! + 1 : undefined);
+    const canonical = parsed?.node.key && keywordId(parsed.node.key) === id;
+    const block = sectionBlock(key, ctx);
+    const section = block && level !== "config";
+    const lane = id === "lanes" && value ? inlineLane(value, ctx) : null;
+    if (canonical && !lane && (!target || value || !section || !["top", "contract", "stage"].includes(level))) return [];
+    if (target) {
+      if (value || children.length) return [{
+        label: `Go to existing ${label}`, detail: `already defined on line ${target}`, preview: "", targetLine: target,
+        message: `\`${label}:\` already exists on line ${target}. Move these entries into that block.`,
+      }];
+      const name = `Use existing ${label}`;
+      return [{
+        label: name, detail: `line ${target}`, preview: `↳ ${label}: already on line ${target}`, targetLine: target,
+        message: `\`${label}:\` is already on line ${target}. Continue in that block.`,
+        repair: { label: name, line, from: 0, to: text.length, insert: "", targetLine: target },
+      }];
+    }
+    if (section && value && (!lane || children.length)) return [];
+    const suffix = lane ? ":\n" + lane.join("\n") : value ? ": " + value : children.length ? ":" : keyLine(key, level, ancestors, ctx);
+    const replacement = marker + label + suffix;
+    const fragment = text.slice(start).trimEnd();
+    const continuation = !question && replacement.toLowerCase().startsWith(fragment.toLowerCase())
+      ? replacement.slice(fragment.length) : undefined;
+    const name = section && !children.length ? `Insert ${label} block` : `Use ${label}`;
+    return [{
+      label: name, detail: section && !children.length ? "starter block" : "correct the field name",
+      message: section ? `Use \`${label}:\` to start this block.` : `Use \`${label}:\` for this field.`,
+      preview: replacement, continuation,
+      repair: { label: name, line, from: start, to: text.length, insert: indentSuggestion(replacement, start) },
+    }];
+  });
 }
 
 const BLOCKS = new Set([
@@ -36,18 +116,31 @@ function insertLines(lines: string[], at: number, added: string[], label: string
   return { line: at, from: end, to: end, insert: "\n" + added.join("\n"), label };
 }
 
+export function checkedRepair(src: string, compiled: CompileResult, repair: Repair): { source: string; compiled: CompileResult } | null {
+  const source = applyRepair(src, repair);
+  const next = compileSpec(source);
+  const remaining = compiled.diagnostics.filter((item) => item.severity === "error").map((item) => item.message);
+  if (!next.root || next.diagnostics.some((item) => {
+    if (item.severity !== "error") return false;
+    const match = remaining.indexOf(item.message);
+    if (match < 0) return true;
+    remaining.splice(match, 1);
+    return false;
+  })) return null;
+  return { source, compiled: next };
+}
+
 export function collectDraftIssues(src: string, compiled: CompileResult, context: (line: number) => SuggestContext): DraftIssue[] {
   const lines = src.split("\n");
   const issues: DraftIssue[] = [];
   const tree = buildTree(compiled.normalized);
   const errorLines = new Set(compiled.diagnostics.filter((d) => d.severity === "error").map((d) => d.line));
   const rules = new Map(compiled.cases.flatMap((item) => item.rules.filter((rule) => !rule.inherited)).map((rule) => [rule.line, rule]));
-  const report = (node: SpecNode, message: string, repairs: Repair[], from = indentOf(lines[node.line - 1]), ambiguous = false) => {
-    issues.push({ line: node.line, from, to: lines[node.line - 1].trimEnd().length, message, repairs, ambiguous });
+  const report = (node: SpecNode, message: string, repairs: Repair[], from = indentOf(lines[node.line - 1]), ambiguous = false, targetLine?: number) => {
+    issues.push({ line: node.line, from, to: lines[node.line - 1].trimEnd().length, message, repairs, ambiguous, targetLine });
   };
 
   function scan(nodes: SpecNode[], parent?: SpecNode) {
-    const sections = new Set<string>();
     for (const node of nodes) {
       const key = normKey(node.key);
       const text = lines[node.line - 1];
@@ -62,10 +155,14 @@ export function collectDraftIssues(src: string, compiled: CompileResult, context
         return { line: at, from: end, to: end, insert: (lines[at - 1].endsWith(":") ? " " : "") + value };
       };
 
-      if (BLOCKS.has(key)) {
-        if (sections.has(key) && !node.children.length && !node.value) {
-          report(node, "This section already exists.", [add("Remove empty duplicate", "", 0, text.length)]);
-        } else if (!node.children.length && !node.value) {
+      const suggestions = !node.key || errorLines.has(node.line) || BLOCKS.has(key) ? keywordHelp(lines, node.line, ctx(), () => tree) : [];
+      if (suggestions.length) {
+        const [first] = suggestions;
+        report(node, first.message, suggestions.slice(0, 3).flatMap(({ repair }) => repair ? [repair] : []), indentOf(text), false, first.targetLine);
+      }
+
+      if (!suggestions.length && BLOCKS.has(key)) {
+        if (!node.children.length && !node.value) {
           const block = sectionBlock(node.key!, ctx());
           report(node, "This section is unfinished. Add an entry inside it.", block ? [
             insertLines(lines, node.line, block.map((line) => " ".repeat(node.indent) + line), "Add the first entry"),
@@ -86,7 +183,6 @@ export function collectDraftIssues(src: string, compiled: CompileResult, context
           const [first, ...more] = edits;
           if (first) report(node, "The exit gateway has unfinished branches.", [{ ...first, label, more }]);
         }
-        sections.add(key);
       }
 
       const stage = parentKey === "process flow" && /^stage\s+(\d+)\s*(?:\(([^()]*)\)?)?$/i.exec(node.key ?? node.text);
@@ -146,18 +242,11 @@ export function collectDraftIssues(src: string, compiled: CompileResult, context
         }
       }
 
-      if (!node.key && !stage && !["steps", "rules", "proposals"].includes(level)) {
+      if (!suggestions.length && !node.key && !stage && !["steps", "rules", "proposals"].includes(level)) {
         const typed = text.trim().replace(/^-\s+/, "");
         if (typed) {
-          const known = keysFor(level, ancestors);
-          const exact = known.find((option) => keywordId(option) === keywordId(typed));
-          const prefixes = known.filter((option) => option.toLowerCase().startsWith(typed.toLowerCase())).slice(0, 3);
           const isNamedBlock = (level === "lane-name" || level === "cf-name") && /^[\p{L}][\p{L}\p{N} &'-]{1,70}$/u.test(typed);
-          const completion = exact && !node.children.length ? keyLine(exact, level, ancestors, ctx()) : "";
-          const repairs = completion.trim().length > 1
-            ? [add("Complete " + exact, indentSuggestion(completion, node.indent))]
-            : exact || isNamedBlock ? [add("Add missing colon", ":")]
-            : prefixes.map((option) => add("Complete " + option, indentSuggestion(option.slice(typed.length) + keyLine(option, level, ancestors, ctx()), node.indent)));
+          const repairs = isNamedBlock ? [add("Add missing colon", ":")] : [];
           report(node, repairs.length ? "This entry is unfinished." : "This fragment does not match a CaseSpine entry.", repairs, indentOf(text), !repairs.length);
         }
       }

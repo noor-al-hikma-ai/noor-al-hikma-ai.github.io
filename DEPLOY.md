@@ -109,6 +109,11 @@ port `18879` as HTTP. Check `/health` through the proxy before updating the GitH
 
 Set `VITE_COMPLIANCE_ENDPOINT` to the HTTPS URL ending in `/ask` and
 `VITE_CASESPINE_INTENT_ENDPOINT` to the URL ending in `/intent`, then redeploy Pages.
+For model-assisted next-step recommendations, also set `VITE_CASESPINE_NEXT_STEP_ENDPOINT` to
+the URL ending in `/next-step`. Its request is `{ context: { position, state }, options: [{ id, label, size }] }`
+and its response is `{ choice }`. Point the variable at any provider adapter implementing this contract.
+The browser generates and validates the proposed source locally. It sends section type and option labels,
+without sending the case source or uploads. The options work with the variable unset or the model offline.
 Studio sends the highlighted line and possible interpretations when the user chooses
 **Ask AI about this line**. The browser validates a suggested edit and asks the user before applying it.
 If the live service fails, Compliance shows local policy passages with a note and Studio offers a local

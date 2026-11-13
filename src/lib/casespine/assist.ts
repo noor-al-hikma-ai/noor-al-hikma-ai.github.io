@@ -6,6 +6,9 @@ import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, type Decoration
 import { draftIntent, type IntentDraft } from "./intent";
 import { acceptCompletion, completionStatus, startCompletion } from "@codemirror/autocomplete";
 import { componentSpec } from "./configSchema";
+import { checkedRepair, keywordHelp, type KeywordHelp } from "./repairs";
+import { buildTree } from "./tree";
+import { compileSpec } from "./analyze";
 import type { CompileResult } from "./types";
 import { ancestorsAt, indentOf, indentSuggestion, listOptions, translateKey, suggestContinuation, valueOptions, type SuggestContext } from "./suggest";
 
@@ -24,6 +27,10 @@ export function contextFrom(res: CompileResult, line?: number, lines?: string[])
     milestones: [...new Set(stages.map((item) => item.milestone))],
     stages,
     stage: stages.find(contains),
+    subcaseBudget: c ? {
+      tokens: Math.max(0, c.guards.budgetTokens - c.subcases.reduce((used, subcase) => used + subcase.guards.budgetTokens, 0)),
+      usd: Math.max(0, c.guards.budgetUsd - c.subcases.reduce((used, subcase) => used + subcase.guards.budgetUsd, 0)),
+    } : undefined,
   };
 }
 
@@ -32,6 +39,7 @@ interface Ghost {
   pos: number;
   text: string;
   draft?: IntentDraft;
+  keyword?: KeywordHelp;
 }
 const setGhost = StateEffect.define<Ghost | null>();
 const ignoreDraft = StateEffect.define<number>();
@@ -53,14 +61,18 @@ export function acceptIntentDraft(view: EditorView) {
   const draft = currentDraft(view.state);
   if (!draft) return false;
   const source = view.state.doc.toString();
+  return applySourcePreview(view, source, draft.source);
+}
+
+function applySourcePreview(view: EditorView, source: string, replacement: string) {
   let from = 0;
-  while (from < source.length && source[from] === draft.source[from]) from++;
-  let end = source.length, nextEnd = draft.source.length;
-  while (end > from && nextEnd > from && source[end - 1] === draft.source[nextEnd - 1]) {
+  while (from < source.length && source[from] === replacement[from]) from++;
+  let end = source.length, nextEnd = replacement.length;
+  while (end > from && nextEnd > from && source[end - 1] === replacement[nextEnd - 1]) {
     end--;
     nextEnd--;
   }
-  view.dispatch({ changes: { from, to: end, insert: draft.source.slice(from, nextEnd) }, selection: { anchor: nextEnd },
+  view.dispatch({ changes: { from, to: end, insert: replacement.slice(from, nextEnd) }, selection: { anchor: nextEnd },
     scrollIntoView: true, effects: setGhost.of(null), userEvent: "input.complete" });
   return true;
 }
@@ -70,6 +82,29 @@ export function dismissIntentDraft(view: EditorView) {
   if (!draft) return false;
   view.dispatch({ effects: [setGhost.of(null), ignoreDraft.of(draft.line)] });
   return true;
+}
+
+export function goToKeyword(view: EditorView, line: number) {
+  const target = view.state.doc.line(line);
+  view.dispatch({ selection: { anchor: target.to }, scrollIntoView: true, effects: setGhost.of(null) });
+  view.focus();
+}
+
+export function useKeywordHelp(view: EditorView, help: KeywordHelp, snapshot: string) {
+  if (view.state.doc.toString() !== snapshot) return;
+  if (help.targetLine) {
+    if (help.repair) {
+      if (!checkedRepair(snapshot, compileSpec(snapshot), help.repair)) return;
+      const line = view.state.doc.line(help.repair.line);
+      view.dispatch({ changes: { from: line.from, to: line.to, insert: "" }, userEvent: "input.complete" });
+    }
+    goToKeyword(view, help.targetLine);
+  } else if (help.repair) {
+    const edit = checkedRepair(snapshot, compileSpec(snapshot), help.repair);
+    if (!edit) return;
+    applySourcePreview(view, snapshot, edit.source);
+    view.focus();
+  }
 }
 
 class GhostWidget extends WidgetType {
@@ -86,7 +121,7 @@ class GhostWidget extends WidgetType {
     span.setAttribute("aria-hidden", "true");
     const hint = document.createElement("span");
     hint.className = "cm-ghost-hint";
-    hint.textContent = "Tab";
+    hint.textContent = "Tab / →";
     span.appendChild(hint);
     return span;
   }
@@ -105,7 +140,7 @@ const ghostField = StateField.define<Ghost | null>({
   provide: (field) => EditorView.decorations.compute([field], (state) => {
     const g = state.field(field);
     if (!g) return Decoration.none;
-    const widget = new GhostWidget(g.text, !!g.draft);
+    const widget = new GhostWidget(g.text, !!g.draft || !!g.keyword);
     if (!g.draft || g.draft.append) return Decoration.set([Decoration.widget({ widget, side: 1 }).range(g.pos)]);
     const line = state.doc.line(g.draft.line);
     const start = line.from + indentOf(line.text);
@@ -135,6 +170,9 @@ export function ghostText(getCompiled: (s: EditorState) => CompileResult): Exten
         }
         const line = st.doc.lineAt(sel.head);
         const source = st.doc.toString();
+        const lines = source.split("\n");
+        const compiled = getCompiled(st);
+        const context = contextFrom(compiled, line.number, lines);
         if (sel.head === line.to && st.field(dismissedDraft) !== line.number && /^\s*(?:(?:hey|please|can you|could you)[,!]?\s+)*(?:add|create|insert|start|set|escalate|route)\s+/i.test(line.text)) {
           const draft = draftIntent(source, line.number);
           if (draft) {
@@ -142,8 +180,31 @@ export function ghostText(getCompiled: (s: EditorState) => CompileResult): Exten
             return;
           }
         }
-        let text = suggestContinuation(source, sel.head, contextFrom(getCompiled(st), line.number, source.split("\n")));
+        if (sel.head === line.to && st.field(dismissedDraft) !== line.number) {
+          const suggestion = keywordHelp(lines, line.number, context, () => buildTree(compiled.normalized))[0];
+          if (suggestion?.preview && suggestion.continuation === undefined) {
+            if (suggestion.targetLine) {
+              v.dispatch({ effects: setGhost.of({ pos: sel.head, text: "  " + suggestion.preview, keyword: suggestion }) });
+            } else if (suggestion.repair) {
+              const edit = checkedRepair(source, compiled, suggestion.repair);
+              if (edit) showIntentDraft(v, { line: line.number, text: suggestion.preview, ...edit });
+            }
+            return;
+          }
+          if (suggestion?.continuation) {
+            const preview = indentSuggestion(suggestion.continuation, indentOf(line.text));
+            const repair = { line: line.number, from: line.length, to: line.length, insert: preview, label: suggestion.label };
+            v.dispatch({ effects: setGhost.of(checkedRepair(source, compiled, repair) ? { pos: sel.head, text: preview } : null) });
+            return;
+          }
+        }
+        let text = suggestContinuation(source, sel.head, context);
         if (text) text = indentSuggestion(text, line.text.length - line.text.trimStart().length);
+        if (text) {
+          const position = sel.head - line.from;
+          const repair = { line: line.number, from: position, to: position, insert: text, label: "Continue typing" };
+          if (!checkedRepair(source, compiled, repair)) text = null;
+        }
         const cur = st.field(ghostField);
         if ((cur?.text ?? null) === text && cur?.pos === sel.head) return;
         v.dispatch({ effects: setGhost.of(text ? { pos: sel.head, text } : null) });
@@ -155,31 +216,42 @@ export function ghostText(getCompiled: (s: EditorState) => CompileResult): Exten
   );
   const accept = (view: EditorView) => {
     if (acceptIntentDraft(view)) return true;
-    if (completionStatus(view.state) === "active") return acceptCompletion(view);
     const g = view.state.field(ghostField, false);
+    if (g?.keyword) {
+      useKeywordHelp(view, g.keyword, view.state.doc.toString());
+      return true;
+    }
+    if (completionStatus(view.state) === "active") return acceptCompletion(view);
     if (!g) return false;
     view.dispatch({ changes: { from: g.pos, insert: g.text }, selection: { anchor: g.pos + g.text.length }, effects: setGhost.of(null), userEvent: "input.complete" });
     return true;
   };
   const acceptWord = (view: EditorView) => {
     const g = view.state.field(ghostField, false);
-    if (!g || g.draft) return false;
+    if (!g || g.draft || g.keyword) return false;
     const m = /^\s*\S+/.exec(g.text);
     const chunk = m ? m[0] : g.text;
     view.dispatch({ changes: { from: g.pos, insert: chunk }, selection: { anchor: g.pos + chunk.length }, effects: setGhost.of(null) });
     return true;
   };
+  const acceptRight = (view: EditorView) => {
+    const selection = view.state.selection.main;
+    const ghost = view.state.field(ghostField, false);
+    return selection.empty && selection.head === view.state.doc.lineAt(selection.head).to
+      && (ghost?.pos === selection.head || completionStatus(view.state) === "active") && accept(view);
+  };
   const dismiss = (view: EditorView) => {
     if (dismissIntentDraft(view)) return true;
-    if (!view.state.field(ghostField, false)) return false;
-    view.dispatch({ effects: setGhost.of(null) });
+    const ghost = view.state.field(ghostField, false);
+    if (!ghost) return false;
+    view.dispatch({ effects: [setGhost.of(null), ...(ghost.keyword ? [ignoreDraft.of(view.state.doc.lineAt(ghost.pos).number)] : [])] });
     return true;
   };
   return [
     ghostField,
     dismissedDraft,
     plugin,
-    Prec.highest(keymap.of([{ key: "Tab", run: accept }, { key: "Mod-ArrowRight", run: acceptWord }, { key: "Escape", run: dismiss }])),
+    Prec.highest(keymap.of([{ key: "Tab", run: accept }, { key: "ArrowRight", run: acceptRight }, { key: "Mod-ArrowRight", run: acceptWord }, { key: "Escape", run: dismiss }])),
   ];
 }
 

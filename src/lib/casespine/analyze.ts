@@ -6,6 +6,7 @@ import { hasArabic, normalizeArabic } from "./arabic";
 import { compileRule } from "./rules";
 import { componentSpec, fieldSpec, normName, parseInlineMap, validateField } from "./configSchema";
 import { buildTree, normKey, parseList, unquote, type SpecNode } from "./tree";
+import { keysFor, matchKeywords, type Level } from "./suggest";
 import type { CaseAST, CaseFile, Clause, CompileResult, CompiledRule, Diagnostic, Guards, Lane, Stage } from "./types";
 
 const KNOWN_KEYS = new Set([
@@ -14,6 +15,8 @@ const KNOWN_KEYS = new Set([
   "process flow", "subcases", "actuators", "deployment", "business & product constraints", "ai smart suggestions",
   "rollout strategy", "degradation fallback", "config",
 ]);
+const CASE_BLOCKS = new Set(["lanes", "case file", "binding lean contract", "process flow", "cost & traffic guards",
+  "business & product constraints", "deployment", "config", "subcases", "actuators", "ai smart suggestions"]);
 
 export const ARCHETYPES = [
   "KNOWLEDGE_SYNTHESIS_AND_RAG",
@@ -104,9 +107,7 @@ function readGuards(nodes: SpecNode[], g: Guards, diags: Diagnostic[]) {
         break;
       }
       default:
-        if (!n.key)
-          diags.push({ line: n.line, severity: "error", message: "Expected a CaseSpine section or field here. Use `Keyword: value`, or prefix a comment with #." });
-        else if (n.key) g.lines[k] = n.line;
+        invalidField(n, "guards", "the cost and traffic guards", diags);
     }
   }
 }
@@ -119,13 +120,14 @@ function readLanes(n: SpecNode, diags: Diagnostic[]): Lane[] {
     .filter((c) => c.key)
     .map((c) => {
       const lane: Lane = { name: c.key!, line: c.line, roles: [], clearance: [] };
+      if (c.value) diags.push({ line: c.line, severity: "error", message: "Put lane settings on indented lines after the lane name." });
       for (const f of c.children) {
         const k = normKey(f.key);
         if (k === "sso provider" || k === "identity") lane.sso = f.value;
         else if (k === "user") lane.user = f.value;
         else if (k === "roles") lane.roles = parseList(f.value);
         else if (k === "clearance") lane.clearance = parseList(f.value);
-        else diags.push({ line: f.line, severity: "error", message: "Expected SSO Provider, User, Roles, or Clearance in this lane." });
+        else invalidField(f, "lane", "this lane", diags);
         if (k === "roles" || k === "clearance") {
           const value = f.value ?? "";
           if ((value.includes("[") || value.includes("]")) && !/^\[[^\[\]]*\]$/.test(value))
@@ -137,6 +139,10 @@ function readLanes(n: SpecNode, diags: Diagnostic[]): Lane[] {
 }
 
 function readCaseFiles(n: SpecNode, diags: Diagnostic[]): CaseFile[] {
+  const accepted = new Set([...keysFor("case-file", []).map(normKey), "sources"]);
+  for (const child of n.children) {
+    if (!child.key) diags.push({ line: child.line, severity: "error", message: "Give the document collection a name followed by a colon, such as `Policy Documents:`." });
+  }
   return n.children
     .filter((c) => c.key)
     .map((c) => {
@@ -144,6 +150,10 @@ function readCaseFiles(n: SpecNode, diags: Diagnostic[]): CaseFile[] {
       for (const f of c.children) {
         const k = normKey(f.key);
         const v = f.value ?? "";
+        if (!accepted.has(k)) {
+          invalidField(f, "case-file", "a document collection", diags);
+          continue;
+        }
         cf.lines[k] = f.line;
         if (k === "source" || k === "sources") {
           const quoted = [...v.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
@@ -163,11 +173,20 @@ function readCaseFiles(n: SpecNode, diags: Diagnostic[]): CaseFile[] {
     });
 }
 
+function invalidField(node: SpecNode, level: Level, context: string, diags: Diagnostic[]) {
+  const match = matchKeywords(level, [], node.key ?? node.text)[0];
+  diags.push({
+    line: node.line,
+    severity: "error",
+    message: match ? `Use \`${match.key}:\` in ${context}.` : `Choose a supported field in ${context}. Use Ctrl+Space for options.`,
+  });
+}
+
 function readStages(n: SpecNode, diags: Diagnostic[]): Stage[] {
   const stages: Stage[] = [];
   for (const item of n.children) {
-    const sm = /^Stage\s+(\d+)\s*(?:\((.*)\))?/i.exec(item.key ?? item.text);
-    if (!sm) {
+    const sm = /^Stage\s+(\d+)\s*(?:\((.*)\))?$/i.exec(item.key ?? "");
+    if (!sm || item.value) {
       diags.push({ line: item.line, severity: "error", message: "Process Flow items should look like `- Stage 1 (Name):`." });
       continue;
     }
@@ -182,21 +201,29 @@ function readStages(n: SpecNode, diags: Diagnostic[]): Stage[] {
     };
     for (const f of item.children) {
       const k = normKey(f.key);
-      if (k === "when") st.when = f.value ?? "";
+      if (k === "when") {
+        st.when = f.value ?? "";
+        if (!st.when) diags.push({ line: f.line, severity: "error", message: "Describe when this stage starts." });
+      }
       else if (k === "engine") st.engine = f.value;
       else if (k === "steps") {
         st.stepsLine = f.line;
         st.steps = f.children.map((s) => ({ text: s.text, norm: s.text, line: s.line }));
+        if (f.value || !st.steps.length) diags.push({ line: f.line, severity: "error", message: "Add at least one indented step under `Steps:`." });
       } else if (k === "on breach") {
+        for (const child of f.children) if (normKey(child.key) !== "escalate to") invalidField(child, "breach", "On Breach", diags);
         const esc = f.children.find((c) => normKey(c.key) === "escalate to");
         st.escalateTo = esc?.value ?? f.value;
         st.escalateLine = esc?.line ?? f.line;
+        if (!st.escalateTo) diags.push({ line: st.escalateLine, severity: "error", message: "Name the lane or queue that should handle a breach." });
       } else if (k === "escalate to") {
         st.escalateTo = f.value;
         st.escalateLine = f.line;
+        if (!f.value) diags.push({ line: f.line, severity: "error", message: "Name the lane or queue after `Escalate To:`." });
       } else if (k === "reach milestone") {
         st.milestone = (f.value ?? "").split(/\s+/)[0] || st.milestone;
         st.milestoneLine = f.line;
+        if (!f.value) diags.push({ line: f.line, severity: "error", message: "Name the milestone reached when this stage finishes." });
       } else if (k === "exit gateway") {
         const g = { ifText: "", thenText: "", elseText: "", line: f.line, endLine: f.endLine };
         for (const c of f.children) {
@@ -204,12 +231,15 @@ function readStages(n: SpecNode, diags: Diagnostic[]): Stage[] {
           if (ck === "if") g.ifText = c.value ?? "";
           else if (ck === "then") g.thenText = c.value ?? "";
           else if (ck === "else") g.elseText = c.value ?? "";
+          else invalidField(c, "gateway", "the exit gateway", diags);
         }
+        if (!g.ifText || !g.thenText || !g.elseText) diags.push({ line: f.line, severity: "error", message: "Complete the exit gateway with If, Then, and Else branches." });
         st.gate = g;
         const rm = /reach Milestone\s+(\w+)/i.exec(g.thenText);
         if (rm && st.milestone === "StageCompleted") st.milestone = rm[1];
-      }
+      } else invalidField(f, "stage", `Stage ${st.idx}`, diags);
     }
+    if (!st.stepsLine) diags.push({ line: item.line, severity: "error", message: "Add a `Steps:` block to this stage." });
     stages.push(st);
   }
   return stages;
@@ -268,10 +298,19 @@ function analyzeCase(
   ctx.all.push(node);
   const { diags } = ctx;
   const subNodes: SpecNode[] = [];
+  const usedSections = new Set<string>();
 
   for (const n of body) {
     const k = normKey(n.key);
     const v = n.value ?? "";
+    if (CASE_BLOCKS.has(k) || k === "case") {
+      if (usedSections.has(k) || k === "case") {
+        diags.push({ line: n.line, severity: "error", message: `Use one \`${n.key}:\` per case. Move these entries into the existing block.` });
+        continue;
+      }
+      usedSections.add(k);
+      if (v) diags.push({ line: n.line, severity: "error", message: `Put the entries under \`${n.key}:\` on indented lines.` });
+    }
     switch (k) {
       case "version":
         node.version = unquote(v);
@@ -318,7 +357,7 @@ function analyzeCase(
                   message: "Rule cannot be checked. Phrase it as `It is obligatory that <metric> >= <value> before Milestone <Name>.`",
                 });
             });
-          }
+          } else invalidField(c, "contract", "the binding contract", diags);
         }
         break;
       }
@@ -339,6 +378,7 @@ function analyzeCase(
         for (const c of n.children) {
           const m = /^Suggest\s+(\w+):\s*"([^"]+)"\s*(?:\(Moderated by:\s*([^)]+)\))?/i.exec(c.text);
           if (m) node.suggestions.push({ kind: m[1], text: m[2], moderator: (m[3] ?? "").trim(), line: c.line });
+          else diags.push({ line: c.line, severity: "error", message: "Start an entry with `- Suggest name: \"Describe the proposal\"`." });
         }
         break;
       case "process flow":
@@ -346,32 +386,49 @@ function analyzeCase(
         node.stages = readStages(n, diags);
         break;
       case "actuators":
-        for (const c of n.children) if (c.key) node.actuators[c.key] = c.value ?? "";
+        for (const c of n.children) {
+          if (c.key) node.actuators[c.key] = c.value ?? "";
+          else invalidField(c, "actuators", "Actuators", diags);
+        }
         break;
       case "deployment":
-        for (const c of n.children) if (c.key) node.deployment[c.key] = c.value ?? "";
+        for (const c of n.children) {
+          if (c.key) node.deployment[c.key] = c.value ?? "";
+          else invalidField(c, "deployment", "Deployment", diags);
+        }
         break;
       case "config":
         node.configLine = n.line;
         for (const comp of n.children) {
-          if (!comp.key) continue;
+          if (!comp.key) {
+            invalidField(comp, "config", "Config", diags);
+            continue;
+          }
           const cname = normName(comp.key);
           const spec = componentSpec(comp.key);
-          const pairs: [string, string][] = (comp.value ?? "").trim().startsWith("{")
-            ? parseInlineMap(comp.value ?? "")
-            : comp.children.filter((f) => f.key).map((f) => [f.key!, f.value ?? ""] as [string, string]);
+          const inline = (comp.value ?? "").trim().startsWith("{");
+          const pairs = inline
+            ? parseInlineMap(comp.value ?? "").map(([key, value]) => ({ key, value, line: comp.line }))
+            : comp.children.map((field) => ({ key: field.key, value: field.value ?? "", line: field.line }));
           node.config[cname] = { ...(node.config[cname] ?? {}) };
           node.configLines[cname] = comp.line;
           if (!spec)
             diags.push({ line: comp.line, severity: "info", message: `"${comp.key}" is a custom component; its config is kept in the IR for your own tools.` });
-          for (const [k, v] of pairs) {
-            node.config[cname][normName(k)] = v.trim();
+          if (inline && !comp.value?.trim().endsWith("}")) {
+            diags.push({ line: comp.line, severity: "error", message: "Close the component settings with `}`." });
+          }
+          for (const { key, value, line } of pairs) {
+            if (!key) {
+              diags.push({ line, severity: "error", message: `Use \`Field: value\` inside ${comp.key}.` });
+              continue;
+            }
+            node.config[cname][normName(key)] = value.trim();
             if (!spec) continue;
-            const fs = fieldSpec(comp.key, k);
-            if (!fs) diags.push({ line: comp.line, severity: "warning", message: `${spec.name} has no field "${k}". Available: ${spec.fields.map((f) => f.key).join(", ")}.` });
+            const fs = fieldSpec(comp.key, key);
+            if (!fs) diags.push({ line, severity: "error", message: `${spec.name} has no field "${key}". Available: ${spec.fields.map((f) => f.key).join(", ")}.` });
             else {
-              const err = validateField(fs, v);
-              if (err) diags.push({ line: comp.line, severity: "error", message: err });
+              const err = validateField(fs, value);
+              if (err) diags.push({ line, severity: "error", message: err });
             }
           }
         }
@@ -383,10 +440,7 @@ function analyzeCase(
         subNodes.push(...n.children);
         break;
       default:
-        if (!n.key)
-          diags.push({ line: n.line, severity: "error", message: "Expected a CaseSpine section or field here. Use `Keyword: value`, or prefix a comment with #." });
-        else if (n.key && !KNOWN_KEYS.has(k))
-          diags.push({ line: n.line, severity: "info", message: `Section "${n.key}" is not a core keyword; kept as extension metadata in the IR.` });
+        if (!n.key || !KNOWN_KEYS.has(k)) invalidField(n, "top", "this case", diags);
     }
   }
 
