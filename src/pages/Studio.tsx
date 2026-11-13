@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CodeEditor } from "../components/CodeEditor";
+import { CodeEditor, type CodeEditorCommands } from "../components/CodeEditor";
 import { CaseCanvas } from "../components/CaseCanvas";
 import { CopilotPanel } from "../components/CopilotPanel";
 import { caseSpineLanguage } from "../lib/casespine/language";
@@ -44,6 +44,7 @@ export default function Studio() {
       return false;
     }
   });
+  const editorCommands = useRef<CodeEditorCommands>(null);
   const outRef = useRef<HTMLDivElement>(null);
 
   const withStages = compiled.cases.filter((c) => c.stages.length);
@@ -171,12 +172,21 @@ export default function Studio() {
         <section className="panel studio-editor" aria-label="CaseSpine source">
           <div className="panel-head">
             <span className="label">Text · {focus?.name ?? "spec"}</span>
+            <button className="btn btn-ghost btn-sm" onClick={() => {
+              setSpec("");
+              setFocusNs(null);
+              setEditorHl([]);
+            }} disabled={!spec}>Start blank</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => editorCommands.current?.suggestSection()}>{spec ? "Add section" : "Suggest first line"}</button>
             <button className="btn btn-ghost btn-sm" onClick={() => { setSpec(EXAMPLES[0].src); toast("Reset to the reference example", "info"); }} title="Restore the reference example">
               Reset
             </button>
           </div>
+          {!spec && <p className="muted" style={{ margin: "8px 12px" }}>
+            Choose Suggest first line to name your case. Then use Add section to insert a Process Flow.
+          </p>}
           <div style={{ flex: 1, minHeight: 0 }}>
-            <CodeEditor value={spec} onChange={setSpec} onCursorLine={setCursorLine} highlight={editorHl} language={language} />
+            <CodeEditor commands={editorCommands} value={spec} onChange={setSpec} onCursorLine={setCursorLine} highlight={editorHl} language={language} />
           </div>
         </section>
 

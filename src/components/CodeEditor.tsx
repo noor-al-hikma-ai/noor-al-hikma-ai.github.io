@@ -1,9 +1,9 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useImperativeHandle, useRef, type Ref } from "react";
 import { EditorState, StateEffect, StateField, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, type DecorationSet } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { bracketMatching, indentOnInput, foldGutter } from "@codemirror/language";
-import { closeBrackets, completionKeymap } from "@codemirror/autocomplete";
+import { closeBrackets, completionKeymap, startCompletion } from "@codemirror/autocomplete";
 import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
 import { lintKeymap } from "@codemirror/lint";
 
@@ -22,7 +22,12 @@ const hlField = StateField.define<DecorationSet>({
   provide: (f) => EditorView.decorations.from(f),
 });
 
+export interface CodeEditorCommands {
+  suggestSection: () => void;
+}
+
 interface Props {
+  commands?: Ref<CodeEditorCommands>;
   value: string;
   onChange: (v: string) => void;
   onCursorLine?: (line: number) => void;
@@ -31,11 +36,29 @@ interface Props {
   readOnly?: boolean;
 }
 
-export function CodeEditor({ value, onChange, onCursorLine, highlight, language, readOnly }: Props) {
+export function CodeEditor({ value, onChange, onCursorLine, highlight, language, readOnly, commands }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const cb = useRef({ onChange, onCursorLine });
   cb.current = { onChange, onCursorLine };
+
+  useImperativeHandle(commands, () => ({
+    suggestSection() {
+      const editor = view.current;
+      if (!editor) return;
+      const last = editor.state.doc.line(editor.state.doc.lines);
+      const from = last.text.trim() ? last.to : last.from;
+      const insert = last.text.trim() ? "\n" : "";
+      editor.dispatch({
+        changes: { from, to: last.to, insert },
+        selection: { anchor: from + insert.length },
+        scrollIntoView: true,
+        userEvent: "input",
+      });
+      editor.focus();
+      startCompletion(editor);
+    },
+  }), []);
 
   useEffect(() => {
     const v = new EditorView({

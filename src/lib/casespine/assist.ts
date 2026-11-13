@@ -3,7 +3,7 @@
 
 import { Prec, StateEffect, StateField, type EditorState, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, type DecorationSet, type ViewUpdate } from "@codemirror/view";
-import { startCompletion } from "@codemirror/autocomplete";
+import { acceptCompletion, completionStatus, startCompletion } from "@codemirror/autocomplete";
 import { componentSpec } from "./configSchema";
 import type { CompileResult } from "./types";
 import { ancestorsAt, indentSuggestion, listOptions, translateKey, suggestContinuation, valueOptions, type SuggestContext } from "./suggest";
@@ -90,6 +90,7 @@ export function ghostText(getCompiled: (s: EditorState) => CompileResult): Exten
     },
   );
   const accept = (view: EditorView) => {
+    if (completionStatus(view.state) === "active") return acceptCompletion(view);
     const g = view.state.field(ghostField, false);
     if (!g) return false;
     view.dispatch({ changes: { from: g.pos, insert: g.text }, selection: { anchor: g.pos + g.text.length }, effects: setGhost.of(null), userEvent: "input.complete" });

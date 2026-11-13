@@ -8,7 +8,7 @@ const KEY = "noor.casespine.spec.v1";
 
 function load(): string {
   try {
-    return localStorage.getItem(KEY) || RETAIL_WIRE_EN;
+    return localStorage.getItem(KEY) ?? RETAIL_WIRE_EN;
   } catch {
     return RETAIL_WIRE_EN;
   }

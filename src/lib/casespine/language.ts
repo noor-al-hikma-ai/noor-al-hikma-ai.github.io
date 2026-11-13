@@ -15,7 +15,7 @@ import { normKey } from "./tree";
 import { KEYWORDS, PII_ENTITIES, RULE_TEMPLATES, STEP_TEMPLATES } from "./vocab";
 import type { CompileResult } from "./types";
 import { COMPONENTS, componentSpec, fieldSpec, formatValue, inlineDefaults } from "./configSchema";
-import { ancestorsAt, levelOf, listOptions, siblingKeys, translateKey, valueOptions, type Level } from "./suggest";
+import { ancestorsAt, levelOf, listOptions, sectionBlock, indentSuggestion, siblingKeys, translateKey, valueOptions, type Level } from "./suggest";
 import { contextFrom, dropdowns, ghostText, rtlLines, showAllOptions } from "./assist";
 
 // ------------------------------------------------------------------ tokenizer
@@ -215,7 +215,7 @@ function caseSpineCompletions(ctx: CompletionContext): CompletionResult | null {
   // Start of an item / key
   const head = /^\s*(-\s+)?([^:]*)$/.exec(before);
   if (!head) return null;
-  if (!ctx.explicit && !showAll && head[2].length === 0 && !head[1] && before.length === 0) return null;
+
   const from = ctx.pos - head[2].length;
   if (level === "rules") {
     const ms = sctx.milestones[sctx.milestones.length - 1] ?? "InquiryResolved";
@@ -245,7 +245,20 @@ function caseSpineCompletions(ctx: CompletionContext): CompletionResult | null {
       ],
     };
   }
-  const opts = keyCompletions(level, anc, ar);
+  const opts = keyCompletions(level, anc, ar).map((option) => {
+    const key = translateKey(option.label);
+    const block = sectionBlock(key, sctx);
+    if (block && level !== "config" && level !== "config-fields") return {
+      ...option,
+      apply: indentSuggestion(option.label + ":\n" + block.join("\n"), indent + (head[1]?.length ?? 0)),
+    };
+    return option;
+  });
+  if (!res.root && level === "top") {
+    return { from, options: opts.filter((option) => translateKey(option.label) === "Case").map((option) => ({
+      ...option, apply: option.label + ": My Business Case",
+    })) };
+  }
   return { from, options: opts, validFor: /^[\w &()\u0600-\u06FF-]*$/ };
 }
 

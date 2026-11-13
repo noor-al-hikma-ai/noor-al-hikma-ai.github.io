@@ -140,7 +140,7 @@ const DEFAULTS: Record<string, string> = {
 
 const lastMs = (ctx: SuggestContext) => ctx.milestones[ctx.milestones.length - 1] ?? "CaseResolved";
 
-function sectionBlock(key: string, ctx: SuggestContext): string[] | null {
+export function sectionBlock(key: string, ctx: SuggestContext): string[] | null {
   const lane = ctx.lanes[ctx.lanes.length - 1] ?? "Case Owner";
   switch (normKey(key)) {
     case "lanes":
@@ -154,7 +154,13 @@ function sectionBlock(key: string, ctx: SuggestContext): string[] | null {
     case "cost & traffic guards":
       return ["  Budget Ceiling: 4000 tokens or $0.10", "  Rate Limit: 30 requests/minute per Lane", "  Banned Topics: [investment advice]"];
     case "process flow":
-      return stageBlock(1, ctx).map((l) => "  " + l);
+      return [
+        "- Stage 1 (Review):",
+        "    When: Request received",
+        "    Steps:",
+        "      - Review the case evidence",
+        "    Reach Milestone: CaseResolved",
+      ].map((line) => "  " + line);
     case "config":
       return ["  Retriever: { Mode: hybrid, Top K: 3 }", "  Synthesizer: { Model: auto, Max Sentences: 3 }", "  Exit Gateway: { Fail Mode: fail-closed }"];
     case "deployment":
