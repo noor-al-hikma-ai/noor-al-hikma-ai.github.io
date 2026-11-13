@@ -58,7 +58,8 @@ export default function Sandbox() {
 
   const [docs, setDocs] = useState<ExtractedDoc[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
-  const [index, setIndex] = useState<Index | null>(null);
+  const [indexed, setIndexed] = useState<{ index: Index; docs: ExtractedDoc[]; key: string } | null>(null);
+  const [uploadErrors, setUploadErrors] = useState<string[]>([]);
   const [lane, setLane] = useState<string>("");
   const [query, setQuery] = useState(SAMPLE_QUESTIONS[0]);
   const [trace, setTrace] = useState<RunTrace | null>(null);
@@ -93,32 +94,34 @@ export default function Sandbox() {
         c.config["retriever"]?.["dense dims"],
       ])
     : "";
+  const index = indexed?.docs === docs && indexed.key === indexKey ? indexed.index : null;
   useEffect(() => {
+    // Answers and citations from a previous corpus must never be reused.
+    session.current.cache = [];
+    setTrace(null);
+    setRun(null);
     if (!c || !docs.length) {
-      setIndex(null);
+      setIndexed(null);
       return;
     }
-    const t = setTimeout(() => {
-      const idx = buildIndex(docs, c);
-      setIndex(idx);
-      setLedger((L) => {
-        let l = L;
-        l = append(l, "casespine-runtime", "curation.completed", {
-          namespace: c.namespacePath,
-          chunks: idx.report.chunks.length,
-          quarantined: idx.report.quarantined.length,
-          piiRedacted: idx.report.piiRedacted,
-          piiLeftInPlace: idx.report.piiLeftInPlace,
-        });
-        l = append(l, "casespine-runtime", "index.built", { vocab: idx.bm25.vocabSize, denseDims: idx.dense.dims, ms: Math.round(idx.ms) });
-        return l;
+    const idx = buildIndex(docs, c);
+    setIndexed({ index: idx, docs, key: indexKey });
+    setLedger((L) => {
+      let l = L;
+      l = append(l, "casespine-runtime", "curation.completed", {
+        namespace: c.namespacePath,
+        chunks: idx.report.chunks.length,
+        quarantined: idx.report.quarantined.length,
+        piiRedacted: idx.report.piiRedacted,
+        piiLeftInPlace: idx.report.piiLeftInPlace,
       });
-      const nodes = orderedNodes(c);
-      const curationKinds: NodeKind[] = ["source", "extract", "pii", "coherence", "isolate"];
-      const firstMs = nodes.find((n) => n.kind === "milestone");
-      setRun({ lit: nodes.filter((n) => curationKinds.includes(n.kind) || n.id === firstMs?.id).map((n) => n.id) });
-    }, 30);
-    return () => clearTimeout(t);
+      l = append(l, "casespine-runtime", "index.built", { vocab: idx.bm25.vocabSize, denseDims: idx.dense.dims, ms: Math.round(idx.ms) });
+      return l;
+    });
+    const nodes = orderedNodes(c);
+    const curationKinds: NodeKind[] = ["source", "extract", "pii", "coherence", "isolate"];
+    const firstMs = nodes.find((n) => n.kind === "milestone");
+    setRun({ lit: nodes.filter((n) => curationKinds.includes(n.kind) || n.id === firstMs?.id).map((n) => n.id) });
   }, [docs, indexKey]);
 
   // Compile event on case change.
@@ -150,16 +153,22 @@ export default function Sandbox() {
 
   const addDocs = async (files: FileList | File[]) => {
     const list = [...files];
+    if (!list.length || busy) return;
+    setUploadErrors([]);
+    const extracted: ExtractedDoc[] = [];
     for (const f of list) {
       setBusy(`Extracting ${f.name}…`);
       try {
         const d = await extractFile(f);
-        setDocs((D) => [...D.filter((x) => x.name !== d.name), d]);
+        if (!d.pages.some((page) => page.text.trim())) throw new Error("No extractable text");
+        extracted.push(d);
         setLedger((L) => append(L, agent, "casefile.ingested", { file: d.name, kind: d.kind, bytes: d.bytes, pages: d.pages.length, sha256: d.sha256 }));
       } catch (e) {
+        setUploadErrors((errors) => [...errors, `Could not read ${f.name}: ${e instanceof Error ? e.message : "invalid file"}`]);
         setLedger((L) => append(L, agent, "casefile.rejected", { file: f.name, error: String(e).slice(0, 160) }));
       }
     }
+    if (extracted.length) setDocs((current) => extracted.reduce((all, doc) => [...all.filter((item) => item.name !== doc.name), doc], current));
     setBusy(null);
   };
 
@@ -169,10 +178,12 @@ export default function Sandbox() {
     setLedger((L) => ds.reduce((l, d) => append(l, agent, "casefile.ingested", { file: d.name, kind: "md", bytes: d.bytes, pages: d.pages.length, sha256: d.sha256, synthetic: true }), L));
   };
 
-  const animate = (t: RunTrace) => {
+  const showPipeline = (t: RunTrace) => {
     if (!c) return;
     const nodes = orderedNodes(c);
-    const preRun = run?.lit ?? [];
+    const curation = ["source", "extract", "pii", "coherence", "isolate"];
+    const firstMilestone = nodes.find((node) => node.kind === "milestone");
+    const preRun = nodes.filter((node) => curation.includes(node.kind) || node.id === firstMilestone?.id).map((node) => node.id);
     const stepKinds = t.steps.flatMap((s) => (s.status === "block" && s.id !== "gate" && s.id !== "synth" ? [] : STEP_KIND[s.id] ?? []));
     const blockedStep = t.blocked ? t.steps.find((s) => s.status === "block") : undefined;
     const blockedNode = blockedStep ? nodes.find((n) => (STEP_KIND[blockedStep.id] ?? []).includes(n.kind)) : undefined;
@@ -186,21 +197,11 @@ export default function Sandbox() {
       if (n.kind === "milestone") return i < gateIdx || ok;
       return true;
     });
-    let i = 0;
-    setRun({ lit: preRun });
-    const timer = setInterval(() => {
-      i++;
-      const lit = [...preRun, ...seq.slice(0, i).map((n) => n.id)];
-      if (i >= seq.length) {
-        clearInterval(timer);
-        setRun({ lit, outcome: t.outcome, blockedAt: blockedNode?.id });
-      } else setRun({ lit });
-    }, 140);
+    setRun({ lit: [...preRun, ...seq.map((node) => node.id)], outcome: t.outcome, blockedAt: blockedNode?.id });
   };
 
   const ask = (q = query) => {
-    if (!c) return;
-    if (!q.trim()) return;
+    if (!c || busy || !q.trim()) return;
     if (!index) {
       // No documents yet: load the sample bank policies and answer as soon as they are indexed.
       setPending(q);
@@ -208,10 +209,9 @@ export default function Sandbox() {
       return;
     }
     const t = runQuery(q, c, index, session.current, { lane: agent, probes, injectConfounder: inject });
-    setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 60);
     setTrace(t);
     setOpenCite(null);
-    animate(t);
+    showPipeline(t);
     setLedger((L) => {
       let l = append(L, agent, "query.received", { lane: agent, sso: `${sso} (simulated)`, query: q, querySha256: sha256Hex(q) });
       if (t.blocked) return append(l, "roi-governor", "query.blocked", { reason: t.blockReason, tokens: 0 });
@@ -249,8 +249,12 @@ export default function Sandbox() {
     }
   }, [index, pending]);
 
-  const corrected = trace && index ? correctSpelling(trace.query, index) : null;
-  const related = trace && index ? relatedQuestions(trace.query, index, trace) : [];
+  useEffect(() => {
+    if (trace) resultRef.current?.scrollIntoView({ block: "nearest" });
+  }, [trace]);
+
+  const corrected = useMemo(() => trace && index ? correctSpelling(trace.query, index) : null, [trace, index]);
+  const related = useMemo(() => trace && index ? relatedQuestions(trace.query, index, trace) : [], [trace, index]);
   const topK = c ? cfg<number>(c.config, "Retriever", "Top K") : 3;
 
   const decide = (id: number, status: "approved" | "rejected") => {
@@ -278,7 +282,7 @@ export default function Sandbox() {
     <div className="app-page sandbox">
       <div className="app-head">
         <h1>RAG Sandbox</h1>
-        <span className="sub">Upload documents, ask questions — every answer passes the case's ROI guards and Lean 4 gate. Nothing leaves this tab.</span>
+        <span className="sub">Ask questions over documents using local retrieval and extractive answers. The browser evaluates CaseSpine rules and simulates cost controls.</span>
       </div>
       <div className="sb-bar">
         <label>
@@ -339,14 +343,14 @@ export default function Sandbox() {
             >
               <b>Drop PDF, DOCX, TXT, MD, HTML</b>
               <span>or click to choose · parsed locally, never uploaded</span>
-              <input ref={fileInput} type="file" multiple hidden accept=".pdf,.docx,.txt,.md,.markdown,.html,.htm,.csv,.json" onChange={(e) => e.target.files && addDocs(e.target.files)} />
+              <input ref={fileInput} type="file" multiple hidden accept=".pdf,.docx,.txt,.md,.markdown,.html,.htm,.csv,.json" onChange={(e) => { if (e.target.files) void addDocs(e.target.files); e.target.value = ""; }} />
             </div>
             <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-              <button className="btn btn-gold btn-sm" onClick={loadSamples}>
+              <button className="btn btn-gold btn-sm" onClick={loadSamples} disabled={!!busy}>
                 Load synthetic bank corpus
               </button>
               {docs.length > 0 && (
-                <button className="btn btn-ghost btn-sm" onClick={() => setDocs([])}>
+                <button className="btn btn-ghost btn-sm" onClick={() => { setDocs([]); setUploadErrors([]); }} disabled={!!busy}>
                   Clear
                 </button>
               )}
@@ -355,6 +359,7 @@ export default function Sandbox() {
               No PDF handy? <a href="./samples/demo_bank_card_disputes.pdf" download>Download a synthetic sample</a> and drop it above.
             </div>
             {busy && <div className="muted" style={{ fontSize: 13, marginTop: 8 }}>{busy}</div>}
+            {uploadErrors.length > 0 && <ul role="alert">{uploadErrors.map((error, i) => <li key={i}>{error}</li>)}</ul>}
             {docs.map((d) => (
               <div key={d.name} className="sb-doc">
                 <span className="mono">{d.name}</span>
@@ -438,7 +443,7 @@ export default function Sandbox() {
               }}
             >
               <input type="text" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Question" placeholder="Ask about the case file…" />
-              <button className="btn btn-primary" disabled={!!pending || !query.trim()}>
+              <button className="btn btn-primary" disabled={!!pending || !!busy || !query.trim()}>
                 {pending ? "Loading policies…" : "Ask"}
               </button>
             </form>
@@ -447,7 +452,7 @@ export default function Sandbox() {
                 <button
                   key={q}
                   className="chip"
-                  disabled={!!pending}
+                  disabled={!!pending || !!busy}
                   onClick={() => {
                     setQuery(q);
                     ask(q);
@@ -463,7 +468,8 @@ export default function Sandbox() {
               </p>
             )}
             {trace && (
-              <div className="fade-up" key={trace.query + trace.latencyMs} ref={resultRef}>
+              <div ref={resultRef} aria-live="polite">
+                <p className="muted" style={{ marginBottom: 6 }}>Question: {trace.query}</p>
                 <div className={`sb-outcome ${outcomeClass}`}>
                   <b>{{ VERIFIED: "✓ Verified answer", BREACH: "✕ Contract breached — halted", FAIL_CLOSED: "◐ Fail-closed — awaiting human", BLOCKED: "⊘ Blocked at 0 tokens" }[trace.outcome]}</b>
                   <span>
@@ -497,7 +503,7 @@ export default function Sandbox() {
                     )}
                   </div>
                 )}
-                {trace.answer && !trace.blocked && (
+                {trace.answer && (trace.outcome === "VERIFIED" || trace.answer.abstained) && (
                   <div className="sb-answer">
                     {trace.answer.abstained ? (
                       <p className="muted">No grounded evidence in the case file — the runtime abstains instead of guessing.</p>
@@ -532,7 +538,7 @@ export default function Sandbox() {
                       </div>
                     )}
                     <div className="muted" style={{ fontSize: 12 }}>
-                      Extractive synthesis runs locally for this demo; in production the same gate wraps the LLM tier chosen by the optimizer.
+                      Passages are selected locally from the case file. Model tiers, token usage, and prices are simulated.
                     </div>
                   </div>
                 )}
@@ -547,7 +553,7 @@ export default function Sandbox() {
                 </ol>
                 {!trace.blocked && (
                   <>
-                    <div className="label" style={{ margin: "14px 0 6px" }}>Lean 4 contract at the exit gateway</div>
+                    <div className="label" style={{ margin: "14px 0 6px" }}>CaseSpine rule checks at the exit gateway</div>
                     {trace.rules.map((r) => (
                       <div key={r.rule.id} className={`sb-rule ${r.verdict === true ? "ok" : r.verdict === false ? "bad" : "warn"}`}>
                         <div className="sb-rule-h">
@@ -565,7 +571,7 @@ export default function Sandbox() {
                         </div>
                       </div>
                     ))}
-                    {trace.ranked.length > 0 && (
+                    {trace.outcome === "VERIFIED" && trace.ranked.length > 0 && (
                       <>
                         <div className="label" style={{ margin: "14px 0 6px" }}>Retrieval trace (BM25 ⋈ dense SVD via RRF)</div>
                         <div className="table-scroll">
@@ -636,11 +642,11 @@ export default function Sandbox() {
                 <div style={{ fontSize: 13 }}>“{e.query}”</div>
                 {e.status === "pending" ? (
                   <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-                    <button className="btn btn-emerald btn-sm" onClick={() => decide(e.id, "approved")}>Approve release</button>
+                    <button className="btn btn-emerald btn-sm" onClick={() => decide(e.id, "approved")}>Approve escalation</button>
                     <button className="btn btn-ghost btn-sm" onClick={() => decide(e.id, "rejected")}>Reject</button>
                   </div>
                 ) : (
-                  <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{e.status === "approved" ? "Approved — logged with approver identity" : "Rejected — output quarantined"}</div>
+                  <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{e.status === "approved" ? "Approved — recorded with the simulated reviewer" : "Rejected — output quarantined"}</div>
                 )}
               </div>
             ))}

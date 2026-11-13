@@ -158,7 +158,7 @@ export function runQuery(query: string, c: CaseAST, idx: Index, session: Session
   steps.push({ id: "preflight", label: "Pre-flight gate", status: "pass", detail: `entropy ${entropy.toFixed(2)} ≥ ${minEntropy}; ${known.length}/${qt.length} terms in corpus` });
 
   // 3. Semantic cache
-  if (g.semanticCache) {
+  if (g.semanticCache && !opt.injectConfounder) {
     const qs = new Set(qt);
     for (const e of session.cache) {
       const inter = [...qs].filter((x) => e.q.has(x)).length;
@@ -213,16 +213,21 @@ export function runQuery(query: string, c: CaseAST, idx: Index, session: Session
   trace.tier = tier;
   trace.compressed = compressed;
   if (!trace.cached) {
+    const total = promptTokens + contextTokens + outTokens;
+    const projected = cost(tier);
+    if (total > g.budgetTokens || projected > g.budgetUsd || projected > session.sessionBudgetUsd - session.spentUsd) {
+      return block("optimizer", "Simulated budget", "The projected run exceeds the case or session budget.");
+    }
     trace.ranked = ranked;
-    trace.tokens = { prompt: promptTokens, context: contextTokens, output: outTokens, total: promptTokens + contextTokens + outTokens };
-    trace.costUsd = cost(tier);
+    trace.tokens = { prompt: promptTokens, context: contextTokens, output: outTokens, total };
+    trace.costUsd = projected;
   }
   steps.push({
     id: "optimizer",
     label: "ROI optimizer",
     status: "pass",
     detail: trace.cached
-      ? "cached answer — no model call"
+      ? "cached passages — no simulated synthesis charge"
       : `${TIERS[tier].label} · ${trace.tokens.total} tokens · $${trace.costUsd.toFixed(4)}${compressed ? ` · context compressed (−${compressed} chunk)` : ""}${remainingFrac < threshold ? ` · ladder engaged at ${(remainingFrac * 100).toFixed(0)}% session budget` : ""}`,
   });
 
@@ -271,7 +276,7 @@ export function runQuery(query: string, c: CaseAST, idx: Index, session: Session
   if (trace.outcome !== "VERIFIED") trace.escalateTo = lastStage?.escalateTo ?? c.lanes.find((l) => l.roles.some((r) => /APPROVER/.test(r)))?.name ?? "Case Owner";
   steps.push({
     id: "gate",
-    label: "Lean 4 exit gateway",
+    label: "CaseSpine rule gate",
     status: trace.outcome === "VERIFIED" ? "pass" : "block",
     detail:
       trace.outcome === "VERIFIED"

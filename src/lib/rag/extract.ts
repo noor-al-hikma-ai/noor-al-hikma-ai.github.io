@@ -13,34 +13,41 @@ export interface ExtractedDoc {
 }
 
 async function pdfPages(buf: ArrayBuffer): Promise<{ num: number; text: string }[]> {
-  const pdfjs = await import("pdfjs-dist");
-  const worker = await import("pdfjs-dist/build/pdf.worker.min.mjs?url");
+  const [pdfjs, worker] = await Promise.all([
+    import("pdfjs-dist"),
+    import("pdfjs-dist/build/pdf.worker.min.mjs?url"),
+  ]);
   pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
-  const doc = await pdfjs.getDocument({ data: new Uint8Array(buf), isEvalSupported: false }).promise;
-  const pages: { num: number; text: string }[] = [];
-  for (let i = 1; i <= doc.numPages; i++) {
-    const page = await doc.getPage(i);
-    const content = await page.getTextContent();
-    // Rebuild lines from glyph runs; a vertical gap well above the line
-    // height marks a paragraph break, so wrapped sentences stay together.
-    let text = "";
-    let lastY: number | null = null;
-    let lineH = 12;
-    for (const item of content.items) {
-      if (!("str" in item)) continue;
-      const y = item.transform[5];
-      if (item.height) lineH = Math.max(6, Math.min(lineH, item.height) || item.height);
-      if (lastY !== null) {
-        const gap = Math.abs(lastY - y);
-        if (gap > lineH * 1.9) text += "\n\n";
-        else if (gap > 2) text += "\n";
+  const task = pdfjs.getDocument({ data: new Uint8Array(buf), isEvalSupported: false });
+  try {
+    const doc = await task.promise;
+    const pages: { num: number; text: string }[] = [];
+    for (let i = 1; i <= doc.numPages; i++) {
+      const page = await doc.getPage(i);
+      const content = await page.getTextContent();
+      // Rebuild lines from glyph runs; a vertical gap well above the line
+      // height marks a paragraph break, so wrapped sentences stay together.
+      let text = "";
+      let lastY: number | null = null;
+      let lineH = 12;
+      for (const item of content.items) {
+        if (!("str" in item)) continue;
+        const y = item.transform[5];
+        if (item.height) lineH = Math.max(6, Math.min(lineH, item.height) || item.height);
+        if (lastY !== null) {
+          const gap = Math.abs(lastY - y);
+          if (gap > lineH * 1.9) text += "\n\n";
+          else if (gap > 2) text += "\n";
+        }
+        text += item.str;
+        lastY = y;
       }
-      text += item.str;
-      lastY = y;
+      pages.push({ num: i, text });
     }
-    pages.push({ num: i, text });
+    return pages;
+  } finally {
+    await task.destroy();
   }
-  return pages;
 }
 
 function docxPages(buf: ArrayBuffer): { num: number; text: string }[] {
@@ -58,9 +65,10 @@ function docxPages(buf: ArrayBuffer): { num: number; text: string }[] {
 }
 
 function htmlToText(s: string) {
-  const d = new DOMParser().parseFromString(s, "text/html");
-  d.querySelectorAll("script,style,noscript").forEach((n) => n.remove());
-  return d.body.innerText || d.body.textContent || "";
+  const template = document.createElement("template");
+  template.innerHTML = s;
+  template.content.querySelectorAll("script,style,noscript,head").forEach((node) => node.remove());
+  return template.content.textContent ?? "";
 }
 
 async function digest(buf: ArrayBuffer): Promise<string> {
@@ -78,7 +86,7 @@ export async function extractFile(file: File): Promise<ExtractedDoc> {
   let pages: { num: number; text: string }[];
   let kind = ext;
   if (ext === "pdf" || file.type === "application/pdf") {
-    pages = await pdfPages(buf.slice(0));
+    pages = await pdfPages(buf);
     kind = "pdf";
   } else if (ext === "docx") {
     pages = docxPages(buf);

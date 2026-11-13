@@ -1,17 +1,39 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ComponentType } from "react";
 import { NetStripe } from "./components/NetStripe";
 import { Logo } from "./components/Logo";
 import { contactHref, SITE } from "./config";
 import { useRoute, type Route } from "./router";
 
-const Home = lazy(() => import("./pages/Home"));
-const Paper = lazy(() => import("./pages/Paper"));
-const Walkthrough = lazy(() => import("./pages/Walkthrough"));
-const Studio = lazy(() => import("./pages/Studio"));
-const Sandbox = lazy(() => import("./pages/Sandbox"));
-const Services = lazy(() => import("./pages/Services"));
-const Trust = lazy(() => import("./pages/Trust"));
-const About = lazy(() => import("./pages/About"));
+const loaders: Record<Route, () => Promise<{ default: ComponentType }>> = {
+  home: () => import("./pages/Home"),
+  brief: () => import("./pages/Paper"),
+  walkthrough: () => import("./pages/Walkthrough"),
+  studio: () => import("./pages/Studio"),
+  sandbox: () => import("./pages/Sandbox"),
+  services: () => import("./pages/Services"),
+  trust: () => import("./pages/Trust"),
+  about: () => import("./pages/About"),
+};
+const pendingPages = new Map<Route, Promise<{ default: ComponentType }>>();
+const pages = new Map<Route, ComponentType>();
+
+function loadPage(route: Route) {
+  const existing = pendingPages.get(route);
+  if (existing) return existing;
+  const request = loaders[route]().then((module) => {
+    pages.set(route, module.default);
+    return module;
+  }).catch((error) => {
+    pendingPages.delete(route);
+    throw error;
+  });
+  pendingPages.set(route, request);
+  return request;
+}
+
+function warmPage(route: Route) {
+  void loadPage(route).catch(() => {});
+}
 
 const NAV: { route: Route; label: string }[] = [
   { route: "walkthrough", label: "How it works" },
@@ -24,9 +46,45 @@ const NAV: { route: Route; label: string }[] = [
 
 export default function App() {
   const { route, anchor } = useRoute();
+  const [displayed, setDisplayed] = useState<Route | null>(null);
+  const [failed, setFailed] = useState<Route | null>(null);
   const [open, setOpen] = useState(false);
   const brandRef = useRef<HTMLAnchorElement>(null);
   const headerRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    let current = true;
+    setFailed(null);
+    if (pages.has(route)) setDisplayed(route);
+    else loadPage(route).then(
+      () => { if (current) setDisplayed(route); },
+      () => { if (current) setFailed(route); },
+    );
+    return () => { current = false; };
+  }, [route]);
+
+  const Page = pages.get(route) ?? (displayed ? pages.get(displayed) : undefined);
+  const visibleRoute = pages.has(route) ? route : (displayed ?? route);
+
+  useEffect(() => {
+    if (!Page) return;
+    const connection = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
+    if (connection?.saveData || connection?.effectiveType?.includes("2g")) return;
+    let active = true;
+    const warm = async () => {
+      for (const next of ["sandbox", "studio", "walkthrough", "services", "about", "trust"] as const) {
+        if (!active) return;
+        await loadPage(next).catch(() => {});
+      }
+    };
+    const idle = window.requestIdleCallback?.(warm);
+    const timer = idle === undefined ? window.setTimeout(warm, 500) : undefined;
+    return () => {
+      active = false;
+      if (idle !== undefined) window.cancelIdleCallback(idle);
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [!!Page]);
 
   // The watermark stripe starts right after the brand and runs to the screen edge.
   useEffect(() => {
@@ -41,9 +99,13 @@ export default function App() {
 
   useEffect(() => {
     setOpen(false);
-    if (anchor) setTimeout(() => document.getElementById(anchor)?.scrollIntoView({ behavior: "smooth" }), 120);
+  }, [route]);
+
+  useEffect(() => {
+    if (!Page || visibleRoute !== route) return;
+    if (anchor) document.getElementById(anchor)?.scrollIntoView();
     else window.scrollTo({ top: 0 });
-  }, [route, anchor]);
+  }, [Page, visibleRoute, route, anchor]);
 
   return (
     <>
@@ -59,7 +121,7 @@ export default function App() {
         </button>
         <nav className={`nav-links${open ? " open" : ""}`}>
           {NAV.map((n) => (
-            <a key={n.route} href={`#/${n.route}`} className={route === n.route ? "active" : ""} aria-current={route === n.route ? "page" : undefined}>
+            <a key={n.route} href={`#/${n.route}`} onPointerEnter={() => warmPage(n.route)} onFocus={() => warmPage(n.route)} className={visibleRoute === n.route ? "active" : ""} aria-current={visibleRoute === n.route ? "page" : undefined}>
               {n.label}
             </a>
           ))}
@@ -69,18 +131,14 @@ export default function App() {
         </nav>
       </header>
       <main>
-        <Suspense fallback={<div className="paper muted sans">Loading…</div>}>
-          {route === "home" && <Home />}
-          {route === "brief" && <Paper />}
-          {route === "walkthrough" && <Walkthrough />}
-          {route === "studio" && <Studio />}
-          {route === "sandbox" && <Sandbox />}
-          {route === "services" && <Services />}
-          {route === "trust" && <Trust />}
-          {route === "about" && <About />}
-        </Suspense>
+        {failed === route && (
+          <div className="paper" role="alert">
+            This page couldn’t open. <button className="btn btn-ghost" onClick={() => window.location.reload()}>Reload site</button>
+          </div>
+        )}
+        {Page && <Page />}
       </main>
-      {route !== "studio" && (
+      {visibleRoute !== "studio" && (
         <footer className="footer">
           <div className="footer-inner">
             <div>

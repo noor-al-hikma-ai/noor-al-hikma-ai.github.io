@@ -110,20 +110,21 @@ example : ProcessContract witness := by decide`} />
   },
   {
     kicker: "Step 6",
-    title: "Ask — and get the proof",
-    text: "Answers arrive with citations to the exact page, the rules they satisfied and what they cost. If Noor is unsure, a named person decides.",
+    title: "Review an example answer",
+    text: "This scripted example shows how a reviewer can see the sources and conditions attached to an answer. Try the sandbox to ask a question against sample policies.",
     visual: () => (
       <div className="sd-answer">
-        <div className="sd-badge">✓ Verified · 2.1 s · 3 fils</div>
+        <div className="sd-badge">Illustrative answer</div>
         <p>Yes — up to AED 2.0 million on 90-day terms, if the goods are owned before sale and the buyer passes screening. <span className="sd-cite">[1]</span> <span className="sd-cite">[2]</span></p>
         <div className="sd-cites"><span>[1] Credit policy §3</span><span>[2] Murabaha manual §2</span></div>
+        <a className="btn btn-emerald btn-sm" href="#/sandbox">Ask a sample policy question</a>
       </div>
     ),
   },
   {
     kicker: "Step 7",
     title: "Deploy inside your walls",
-    text: "One file runs in your bank's cloud or data centre, signs in with your identity provider and registers with your data catalog. Nothing leaves the UAE.",
+    text: "The deployment definition records target infrastructure, identity and data controls. Engineers integrate and validate them in the institution’s approved environment.",
     visual: () => (
       <div className="sd-stack">
         <Code src={`Deployment:

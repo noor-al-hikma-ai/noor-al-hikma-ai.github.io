@@ -12,7 +12,6 @@ import { getSpec, setSpec, useSpec } from "../store";
 import "./studio.css";
 
 const language = caseSpineLanguage();
-const STEPS = ["Parse", "Formalise", "Prove", "Assemble"];
 
 function download(name: string, bytes: Uint8Array | string, type = "application/octet-stream") {
   const blob = new Blob([bytes as BlobPart], { type });
@@ -37,7 +36,6 @@ export default function Studio() {
   const [focusNs, setFocusNs] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [copilot, setCopilot] = useState(false);
-  const [step, setStep] = useState(-1);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [coach, setCoach] = useState(() => {
     try {
@@ -51,7 +49,8 @@ export default function Studio() {
   const withStages = compiled.cases.filter((c) => c.stages.length);
   const focus: CaseAST | undefined = compiled.cases.find((c) => c.namespacePath === focusNs) ?? withStages[0] ?? compiled.root ?? undefined;
   const targets = useMemo(() => emitAll(compiled, focus), [compiled, focus]);
-  const csar = useMemo(() => (compiled.root ? buildCsar(compiled) : null), [compiled]);
+
+  const csar = useMemo(() => tab === "csar" && compiled.root ? buildCsar(compiled) : null, [tab, compiled]);
   const errors = compiled.diagnostics.filter((d) => d.severity === "error");
   const warnings = compiled.diagnostics.filter((d) => d.severity === "warning").length;
   const rules = compiled.cases.reduce((a, c) => a + c.rules.filter((r) => !r.inherited).length, 0);
@@ -85,30 +84,18 @@ export default function Studio() {
   };
 
   const compile = () => {
-    if (step >= 0) return;
-    let i = 0;
-    setStep(0);
-    const t = setInterval(() => {
-      i++;
-      if (i < STEPS.length) {
-        setStep(i);
-        return;
-      }
-      clearInterval(t);
-      setStep(-1);
-      const r = getSpec().compiled;
-      const errs = r.diagnostics.filter((d) => d.severity === "error");
-      if (errs.length || !r.root) {
-        setTab("diag");
-        setEditorHl([errs[0]?.line ?? 1]);
-        toast(`${errs.length || 1} problem${errs.length > 1 ? "s" : ""} to fix — see Diagnostics`, "bad");
-      } else {
-        setTab("lean");
-        const n = r.cases.reduce((a, c) => a + c.rules.filter((x) => !x.inherited).length, 0);
-        toast(`Compiled · ${r.cases.length} case${r.cases.length > 1 ? "s" : ""} · ${n} rules → Lean 4 · 9 targets · ${r.ms.toFixed(1)} ms`);
-      }
-      outRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    }, 170);
+    const r = getSpec().compiled;
+    const errs = r.diagnostics.filter((d) => d.severity === "error");
+    if (errs.length || !r.root) {
+      setTab("diag");
+      setEditorHl([errs[0]?.line ?? 1]);
+      toast(`${errs.length || 1} problem${errs.length > 1 ? "s" : ""} to fix — see Diagnostics`, "bad");
+    } else {
+      setTab("lean");
+      const n = r.cases.reduce((a, c) => a + c.rules.filter((x) => !x.inherited).length, 0);
+      toast(`Compiled · ${r.cases.length} case${r.cases.length > 1 ? "s" : ""} · ${n} rules → Lean 4 · 9 targets · ${r.ms.toFixed(1)} ms`);
+    }
+    outRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   };
 
   useEffect(() => {
@@ -148,10 +135,10 @@ export default function Studio() {
               <option key={e.id} value={e.id}>{e.label}</option>
             ))}
           </select>
-          <button className="btn btn-primary" onClick={compile} disabled={step >= 0} title="Compile (⌘/Ctrl + Enter)">
+          <button className="btn btn-primary" onClick={compile} title="Compile (⌘/Ctrl + Enter)">
             ▶ Compile
           </button>
-          <button className="btn btn-ghost btn-sm" disabled={!csar} onClick={() => { if (csar) { download(csar.fileName, csar.bytes); toast(`Downloaded ${csar.fileName}`, "info"); } }} title="Portable assembly: python3 file.csar info">
+          <button className="btn btn-ghost btn-sm" disabled={!compiled.root || errors.length > 0} onClick={() => { const assembly = csar ?? buildCsar(compiled); if (assembly) { download(assembly.fileName, assembly.bytes); toast(`Downloaded ${assembly.fileName}`, "info"); } }} title="Portable assembly: python3 file.csar info">
             ⬇ .csar
           </button>
           <a className="btn btn-emerald btn-sm" href="#/sandbox">Run in Sandbox →</a>
@@ -167,14 +154,6 @@ export default function Studio() {
       )}
 
       <div className="studio-status">
-        {step >= 0 ? (
-          <div className="stepper" aria-live="polite">
-            {STEPS.map((s, i) => (
-              <span key={s} className={i < step ? "done" : i === step ? "on" : ""}>{i < step ? "✓ " : ""}{s}</span>
-            ))}
-          </div>
-        ) : (
-          <>
             <span className={`chip ${errors.length ? "danger" : "emerald"}`}>
               <span className={`dot ${errors.length ? "bad" : "ok"}`} />
               {errors.length ? `${errors.length} error${errors.length > 1 ? "s" : ""}` : "Live-compiled"} · {compiled.ms.toFixed(1)} ms
@@ -183,8 +162,6 @@ export default function Studio() {
             <span className="chip">{rules} rule{rules === 1 ? "" : "s"} → Lean 4</span>
             <span className={`chip ${compiled.language === "ar" ? "gold" : ""}`}>{compiled.language === "ar" ? "العربية → canonical IR" : "English"}</span>
             {warnings > 0 && <button className="chip" style={{ color: "var(--warn)", cursor: "pointer" }} onClick={() => setTab("diag")}>{warnings} warning{warnings > 1 ? "s" : ""}</button>}
-          </>
-        )}
         <span className="muted studio-keys">
           <span className="kbd">Tab</span> accept suggestion · <span className="kbd">Ctrl</span>+<span className="kbd">Space</span> options · <span className="kbd">⌘</span>+<span className="kbd">Enter</span> compile
         </span>
@@ -327,8 +304,8 @@ python3 ${csar.fileName} extract ./out      # unpack scaffolds for engineers`}
           setSpec(s);
           setFocusNs(null);
           setCopilot(false);
-          toast(`Drafted “${name}” — compiling…`, "info");
-          setTimeout(compile, 250);
+          toast(`Drafted “${name}”`, "info");
+          compile();
         }}
       />
 

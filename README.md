@@ -47,6 +47,12 @@ npm run build      # production build into dist/
 npm run preview    # serve dist/ locally, exactly as GitHub Pages will
 ```
 
+The headless Chromium regression suite exercises the production build and reports
+navigation, question, PDF ingestion, and Studio compile timings. With Playwright
+and its Chromium browser installed, run `node scripts/test-browser.mjs dist`
+after building. Set `CHROME_BIN` to use an installed Chrome, `PLAYWRIGHT_MODULE`
+to use an existing Playwright installation, or `NOOR_AUDIT_URL` to check a deployment.
+
 ## Edit before publishing
 
 * `src/config.ts` — contact e-mail or booking URL (used by every "Request a pilot" / "Discuss this" button), LinkedIn, the founder line, and the landing-page film paths (`videos`).
