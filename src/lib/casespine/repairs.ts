@@ -206,7 +206,7 @@ export function intentChoices(src: string, line: number, ctx: SuggestContext): I
   if (level === "constraints") return CONSTRAINT_FACETS.map(({ key }) => ({
     id: "constraint-" + key.toLowerCase(), label: key + " constraint", insert: key + ": " + text.trim(),
   }));
-  if (level === "top") return [
+  if (level === "top" && /^(?:(?:please\s+)?(?:set|add|make|define)\s+(?:the\s+)?(?:business\s+)?deliverable\b|(?:business\s+)?deliverable\s+is\b|(?:the\s+)?(?:case|workflow)\s+(?:must|should)\s+(?:produce|deliver|output|emit)\b)/i.test(text.trim())) return [
     { id: "deliverable", label: "Business deliverable — a concrete output this case must produce", insert: "Business Deliverable: " + text.trim() },
   ];
   return [];

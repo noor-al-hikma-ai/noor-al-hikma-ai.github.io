@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const root=resolve(process.argv[2] || 'dist'), baseline=process.argv[3]==='baseline';
+const modelOrigin=process.env.NOOR_MODEL_URL ? new URL(process.env.NOOR_MODEL_URL).origin : null;
 const mime={'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.css':'text/css','.woff2':'font/woff2','.svg':'image/svg+xml','.pdf':'application/pdf'};
 const server=createServer(async(req,res)=>{
   const path=resolve(root,'.'+new URL(req.url,'http://local').pathname.replace(/\/$/,'/index.html'));
@@ -25,8 +26,9 @@ const context=await browser.newContext({viewport:{width:1440,height:1000},accept
 const page=await context.newPage();
 page.setDefaultTimeout(6500);
 const failures=[];
+const outageResponses=new WeakSet();
 page.on('pageerror',e=>failures.push(e.message));
-page.on('response',r=>{if(r.status()>=400) failures.push(r.status()+' '+r.url());});
+page.on('response',r=>{if(r.status()>=400 && !outageResponses.has(r.request())) failures.push(r.status()+' '+r.url());});
 await page.addInitScript(()=>{
   window.loadingFrames=0;
   const observer=new MutationObserver(()=>{
@@ -295,6 +297,50 @@ try {
     assert.match(await source(), /Stage 2 \(Release review\):\n      When: Milestone EvidenceReady is achieved/);
     checks.push('mobile-size hand-drawn stage boxes become a linked workflow in source and canvas');
     await page.setViewportSize({width:1440,height:1000});
+    if (modelOrigin) {
+      let failuresSimulated=0;
+      const intercept=modelOrigin+'/**';
+      const outage=route=>{
+        failuresSimulated++;
+        outageResponses.add(route.request());
+        return route.fulfill({status:503,contentType:'text/plain',body:'Model temporarily offline',headers:{
+          'Access-Control-Allow-Origin':new URL(url).origin,'Access-Control-Allow-Methods':'POST, OPTIONS','Access-Control-Allow-Headers':'Content-Type',
+        }});
+      };
+      await page.route(intercept,outage);
+      await go('#/compliance');
+      assert.equal(await page.getByLabel('Answer mode').inputValue(),'live');
+      const policy=page.getByTestId('policy-result');
+      await page.getByRole('button',{name:/Who approves a transfer/}).click();
+      await policy.getByRole('heading',{name:'Matching policy passages'}).waitFor();
+      await policy.getByText('Live answer unavailable. Searched the local policy index.').waitFor();
+      assert.match(await policy.innerText(),/Retail Wire Policy §3.*Branch Manager/s);
+      assert.equal(await page.getByRole('alert').count(),0);
+      await page.getByRole('button',{name:/How often must/}).click();
+      await policy.getByText(/four hours/).first().waitFor();
+      assert.equal(failuresSimulated,1,'second lookup should use the local index during the retry pause');
+
+      await page.locator('header nav').getByRole('link',{name:'Studio',exact:true}).click();
+      const review='Need two independent reviewers before release';
+      await replaceSpec('Case: Policy review\nBinding Lean Contract:\n  Rules:\n    - '+review);
+      await editor.press('Escape');
+      await page.locator('.cs-unrecognized').filter({hasText:review}).first().hover();
+      await page.getByRole('button',{name:'Ask AI about this line'}).click();
+      await page.getByText('Live model unavailable. Local draft.').waitFor();
+      await page.getByRole('button',{name:'Accept draft'}).click();
+      assert.match(await source(),/reviewer 1 != reviewer 2/);
+      const unrelated='broccoli guitar wizard 947';
+      await replaceSpec('Case: Policy review\n'+unrelated);
+      await editor.press('Escape');
+      await page.locator('.cs-unrecognized').filter({hasText:unrelated}).first().hover();
+      await page.getByRole('button',{name:'Ask AI about this line'}).click();
+      await page.getByText('Live model unavailable. You can keep this line as a comment.').waitFor();
+      await page.getByRole('button',{name:/Keep as a # comment/}).click();
+      assert.match(await source(),/# broccoli guitar wizard 947/);
+      assert.equal(failuresSimulated,1,'both features should reuse the same origin’s retry pause');
+      await page.unroute(intercept,outage);
+      checks.push('model outage uses local passages, a validated local Studio draft, and the comment action');
+    }
     await go('');
     await page.getByRole('button',{name:'2. Add a draft'}).click();
     await page.getByText('Sample exception goes to the Card Operations Lead.').waitFor();

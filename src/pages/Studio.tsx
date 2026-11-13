@@ -244,6 +244,7 @@ export default function Studio() {
           <div className="panel-head">
             <span className="label">{draft ? "Suggested workflow" : "Visual · click a widget to configure"}</span>
             {draft && <>
+              {draft.localFallback && <small className="muted" role="status">Live model unavailable. Local draft.</small>}
               <button className="btn btn-emerald btn-sm" onClick={() => editorCommands.current?.acceptDraft()}>Accept draft</button>
               <button className="btn btn-ghost btn-sm" onClick={() => editorCommands.current?.dismissDraft()}>Dismiss draft</button>
             </>}

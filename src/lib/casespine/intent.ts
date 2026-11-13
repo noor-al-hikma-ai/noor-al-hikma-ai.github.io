@@ -12,6 +12,7 @@ export interface IntentDraft {
   source: string;
   compiled: CompileResult;
   append?: boolean;
+  localFallback?: boolean;
 }
 
 const shortValue = (value: string) => value.trim().replace(/^[“"']|[”"']$/g, "").trim();
@@ -237,4 +238,13 @@ export function draftIntent(src: string, line: number, command?: string): Intent
     if ([...compiled.fields.keys()].some((field) => !knownFields.has(field))) return null;
   }
   return { line, text: start ? "Case: My Business Case\n" + draft.text : draft.text, source: draftSource, compiled };
+}
+
+export function draftLocalFallback(src: string, line: number, fragment: string): IntentDraft | null {
+  const typed = fragment.trim().replace(/^-\s+/, "");
+  const review = /^(?:(?:we )?(?:need|require) )?two (?:independent|different|distinct) reviewers?(?: before release)?[.!]?$/i.test(typed);
+  const lane = /^(?:would you mind giving us|we need) (?:a |an |the )?(?:second |new )?lane (?:for|called|named) (.{1,76}?) with roles? (.+?)[.?!]?$/i.exec(typed);
+  const command = review ? "add rule four-eyes" : lane ? `add lane ${lane[1]} with roles ${lane[2]}` : typed;
+  const draft = draftIntent(src, line, command);
+  return draft ? { ...draft, localFallback: true } : null;
 }

@@ -18,7 +18,8 @@ import { COMPONENTS, componentSpec, fieldSpec, formatValue, inlineDefaults } fro
 import { ancestorsAt, canSeedBlock, indentOf, indentSuggestion, keyLine, keywordId, laneBlock, lastMs, levelOf, listOptions, proposalText, sectionBlock, siblingKeys, stageBlock, subcaseBlock, translateKey, valueOptions, type Level } from "./suggest";
 import { contextFrom, currentDraft, dropdowns, ghostText, openOptions, rtlLines, showIntentDraft, takeUnfilteredOptions } from "./assist";
 import { applyRepair, collectDraftIssues, commentFragment, intentChoices, validatedIntentRepair, type DraftIssue, type Repair } from "./repairs";
-import { draftIntent } from "./intent";
+import { draftIntent, draftLocalFallback, type IntentDraft } from "./intent";
+import { requestLiveModel } from "../liveModel";
 
 // ------------------------------------------------------------------ tokenizer
 interface TokState {
@@ -408,6 +409,11 @@ function escapeHtml(s: string) {
 // ------------------------------------------------------------------ lint
 const intentEndpoint = import.meta.env.VITE_CASESPINE_INTENT_ENDPOINT?.trim();
 
+function isModelIntent(value: unknown): value is { command?: string; choice?: string | null } {
+  return !!value && typeof value === "object" && (("command" in value && typeof value.command === "string")
+    || ("choice" in value && (value.choice === null || typeof value.choice === "string")));
+}
+
 function applyEditorRepair(view: EditorView, snapshot: string, repair: Repair) {
   if (view.state.doc.toString() !== snapshot) return;
   const changes = view.state.changes([repair, ...(repair.more ?? [])].map((edit) => {
@@ -473,34 +479,31 @@ function draftDiagnostic(state: EditorState, snapshot: string, issue: DraftIssue
         if (ask.disabled || view.state.doc.toString() !== snapshot) return;
         ask.disabled = true;
         status.textContent = "Checking this fragment…";
-        try {
-          const response = await fetch(endpoint, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ fragment: line.text.trim(), options: choices.map(({ id, label }) => ({ id, label })) }),
-            signal: AbortSignal.timeout(8000),
-          });
-          if (!response.ok) throw new Error("Intent check failed");
-          const answer: { choice?: unknown; command?: unknown } = await response.json();
-          if (view.state.doc.toString() !== snapshot || !wrap.isConnected) return;
-          const proposed = typeof answer.command === "string" ? draftIntent(snapshot, issue.line, answer.command) : null;
+        const fragment = line.text.trim();
+        const answer = await requestLiveModel(endpoint, {
+          fragment, options: choices.map(({ id, label }) => ({ id, label })),
+        });
+        if (view.state.doc.toString() !== snapshot || !wrap.isConnected) return;
+        const online = isModelIntent(answer);
+        let draft: IntentDraft | null = null;
+        if (online) {
+          if (answer.command) draft = draftIntent(snapshot, issue.line, answer.command);
           const choice = choices.find((option) => option.id === answer.choice);
-          const repair = !proposed && choice ? validatedIntentRepair(snapshot, issue.line, choice) : null;
-          if (proposed) {
-            view.dispatch({ selection: { anchor: line.to }, scrollIntoView: true });
-            view.focus();
-            showIntentDraft(view, proposed);
-          } else if (repair) {
+          const repair = !draft && choice ? validatedIntentRepair(snapshot, issue.line, choice) : null;
+          if (repair) {
             const source = applyRepair(snapshot, repair);
-            view.dispatch({ selection: { anchor: line.to }, scrollIntoView: true });
-            view.focus();
-            showIntentDraft(view, { line: issue.line, text: repair.insert, source, compiled: compileSpec(source) });
-          } else {
-            status.textContent = "No reliable CaseSpine interpretation. Keep the text as a comment.";
+            draft = { line: issue.line, text: repair.insert, source, compiled: compileSpec(source) };
           }
-        } catch {
-          status.textContent = "AI unavailable. You can keep the text as a comment.";
-          ask.disabled = false;
+        } else draft = draftLocalFallback(snapshot, issue.line, fragment);
+        if (draft) {
+          view.dispatch({ selection: { anchor: line.to }, scrollIntoView: true });
+          view.focus();
+          showIntentDraft(view, draft);
+        } else {
+          status.textContent = online
+            ? "No reliable CaseSpine interpretation. Keep the text as a comment."
+            : "Live model unavailable. You can keep this line as a comment.";
+          ask.disabled = online;
         }
       };
       const note = document.createElement("small");

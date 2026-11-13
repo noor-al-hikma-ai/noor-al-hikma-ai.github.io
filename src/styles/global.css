@@ -246,6 +246,7 @@ table.paper-table { width: 100%; border-collapse: collapse; font-size: 15px; fon
 :root .cm-editor .cs-unrecognized { background-color: color-mix(in oklab, var(--danger) 12%, var(--card)); border-radius: 3px; }
 :root .cm-editor .cs-intent { display: grid; gap: 4px; }
 :root .cm-editor .cs-intent .cm-diagnosticAction { justify-self: start; }
+:root .cm-editor .cs-intent-status { color: var(--ink-3); font-size: 11.5px; }
 :root .cm-editor .cm-hl-line { background: color-mix(in oklab, var(--turquoise) 16%, transparent) !important; animation: hlflash 1.4s ease; }
 @keyframes hlflash { 0% { background: color-mix(in oklab, var(--gold-2) 55%, transparent); } 100% { background: color-mix(in oklab, var(--turquoise) 16%, transparent); } }
 :root .cm-editor .cs-hover { padding: 8px 12px; max-width: 460px; font-size: 13px; line-height: 1.45; }

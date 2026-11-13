@@ -111,7 +111,15 @@ Set `VITE_COMPLIANCE_ENDPOINT` to the HTTPS URL ending in `/ask` and
 `VITE_CASESPINE_INTENT_ENDPOINT` to the URL ending in `/intent`, then redeploy Pages.
 Studio sends the highlighted line and possible interpretations when the user chooses
 **Ask AI about this line**. The browser validates a suggested edit and asks the user before applying it.
-Without the variable, Studio offers local repairs and the comment action.
+If the live service fails, Compliance shows local policy passages with a note and Studio offers a local
+draft for supported phrases or keeps the existing comment action. Both views resume trying the service
+after a short pause following a connection failure.
+
+For a temporary public demo on an already running pod, use the official `cloudflared` binary and run
+`cloudflared tunnel --no-autoupdate --url http://127.0.0.1:18880` on the pod, with `18880` set to the
+local model listener. Use the generated HTTPS hostname for both repository variables. Verify `/health`
+and the Pages origin's CORS preflight first. The hostname lasts for the lifetime of the connector.
+If it changes, update both variables and run the Pages workflow again.
 
 For a private rehearsal, forward the model listener over SSH and serve the site locally with a same-origin
 proxy to `/ask` and `/intent`. Check the Runpod console before changing ports on a running pod because

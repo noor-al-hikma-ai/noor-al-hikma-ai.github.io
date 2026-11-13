@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { checkEvidence, policies, retrieve, type Claim, type Passage } from "../lib/compliance/policies.mjs";
+import { requestLiveModel } from "../lib/liveModel";
 
 const endpoint = import.meta.env.VITE_COMPLIANCE_ENDPOINT?.trim();
 const samples = {
@@ -16,14 +17,21 @@ const samples = {
   ],
 };
 
-type Result = { mode: "live" | "search" | "no-source"; claims: Claim[]; elapsed: number; model?: string };
+type ModelResult = { mode: "live" | "no-source"; claims: Claim[]; model?: string };
+type Result = { source: "model" | "index"; claims: Claim[]; elapsed: number; model?: string; fallback?: boolean };
+
+function isModelResult(value: unknown): value is ModelResult {
+  if (!value || typeof value !== "object") return false;
+  const data = value as Partial<ModelResult>;
+  return (data.mode === "live" || data.mode === "no-source") && Array.isArray(data.claims)
+    && (data.model === undefined || typeof data.model === "string");
+}
 
 export default function Compliance() {
   const [corpus, setCorpus] = useState<Passage["corpus"]>("synthetic");
   const [live, setLive] = useState(Boolean(endpoint));
   const [question, setQuestion] = useState(samples.synthetic[0]);
   const [result, setResult] = useState<Result | null>(null);
-  const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const inFlight = useRef(false);
 
@@ -32,34 +40,33 @@ export default function Compliance() {
     if (inFlight.current || query.length < 6 || query.length > 400) return;
     inFlight.current = true;
     setQuestion(query);
-    setError("");
     setResult(null);
     const start = performance.now();
+    const passages = retrieve(query, corpus);
+    const lookupMs = performance.now() - start;
+    const showPassages = (fallback = false) => setResult({
+      source: "index",
+      claims: passages.map((source) => ({ source, text: source.text, quote: source.text })),
+      elapsed: lookupMs,
+      fallback,
+    });
     try {
-      const passages = retrieve(query, corpus);
       if (!live || corpus === "uae" || !endpoint) {
-        setResult({
-          mode: passages.length ? "search" : "no-source",
-          claims: passages.map((source) => ({ source, text: source.text, quote: source.text })),
-          elapsed: performance.now() - start,
-        });
+        showPassages();
         return;
       }
       setBusy(true);
-      const response = await fetch(endpoint, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: query, corpus: "synthetic" }),
-        signal: AbortSignal.timeout(10_000),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error("Live generation is unavailable right now. Choose Policy search to see the source passages.");
+      const data = await requestLiveModel(endpoint, { question: query, corpus: "synthetic" });
+      if (!isModelResult(data)) {
+        showPassages(true);
+        return;
+      }
       const claims = checkEvidence({
         claims: data.claims.map((claim: Claim) => ({ ...claim, source: claim.source.id })),
       }, passages);
-      if (data.mode !== "live" && data.mode !== "no-source") throw new Error("Unexpected response.");
-      setResult({ mode: data.mode, claims, elapsed: performance.now() - start, model: data.model });
+      setResult({ source: "model", claims, elapsed: performance.now() - start, model: data.model });
     } catch {
-      setError("Live generation could not return a cited answer. Retry or choose Policy search.");
+      showPassages(true);
     } finally {
       inFlight.current = false;
       setBusy(false);
@@ -77,7 +84,6 @@ export default function Compliance() {
             setCorpus(next);
             setQuestion(samples[next][0]);
             setResult(null);
-            setError("");
           }}>
             <option value="synthetic">Fictional Demo Bank</option>
             <option value="uae">Public UAE regulations</option>
@@ -88,7 +94,6 @@ export default function Compliance() {
             <select value={live ? "live" : "search"} disabled={busy} onChange={(event) => {
               setLive(event.target.value === "live");
               setResult(null);
-              setError("");
             }}>
               <option value="live">Live LLM</option>
               <option value="search">Policy search</option>
@@ -113,21 +118,22 @@ export default function Compliance() {
           <button key={sample} className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void ask(sample)}>{sample}</button>
         ))}
       </div>
-      {error && <p role="alert">{error}</p>}
       <section aria-live="polite" data-testid="policy-result">
         {result && <>
-          <h2>{result.mode === "live" ? "Live model answer" : result.mode === "search" ? "Matching policy passages" : "No matching evidence"}</h2>
-          <p className="muted">{Math.round(result.elapsed)} ms {result.mode === "live" ? "request to response" : "local lookup"}{result.model ? ` · ${result.model}` : ""}</p>
+          <h2>{!result.claims.length ? "No matching evidence" : result.source === "model" ? "Live model answer" : "Matching policy passages"}</h2>
+          <p className="muted">{result.fallback
+            ? "Live answer unavailable. Searched the local policy index."
+            : <>{Math.round(result.elapsed)} ms {result.source === "model" ? "request to response" : "local lookup"}{result.model ? ` · ${result.model}` : ""}</>}</p>
           {!result.claims.length && <p>The selected collection did not supply evidence for an answer. Try a different question or check the source list.</p>}
           <ol>
             {result.claims.map((claim, i) => (
               <li key={claim.source.id + i}>
-                <p>{claim.text}</p>
-                <details>
+                <p>{result.source === "index" && <strong>{claim.source.title}. </strong>}{claim.text}</p>
+                {result.source === "model" && <details>
                   <summary>{claim.source.title}</summary>
-                  {result.mode === "live" && <blockquote>{claim.quote}</blockquote>}
-                  {claim.source.url && <a href={claim.source.url} target="_blank" rel="noreferrer">Open the official source</a>}
-                </details>
+                  <blockquote>{claim.quote}</blockquote>
+                </details>}
+                {claim.source.url && <a href={claim.source.url} target="_blank" rel="noreferrer">Open the official source</a>}
               </li>
             ))}
           </ol>
