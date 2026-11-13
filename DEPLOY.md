@@ -75,3 +75,26 @@ set the domain in **Settings → Pages → Custom domain**, create a `CNAME` DNS
 * **404 after deploy** — check Settings → Pages shows *Source: GitHub Actions*, and that the repository name is exactly `<owner>.github.io`.
 * **Workflow failed** — open the failed run in the Actions tab; `npm test` or `npm run build` output shows the cause. Run the same commands locally.
 * **Old version showing** — hard-refresh (⌘⇧R); GitHub Pages caches for up to 10 minutes.
+
+## Compliance demo
+
+GitHub Pages runs Policy search in the browser with a small versioned index.
+Public entries are summaries with official links. The model endpoint accepts
+questions about the synthetic collection only.
+
+1. In the Cloudflare account that should own the Worker, enable Workers & Pages
+   and Workers AI. Authenticate with `npx wrangler login` on your machine.
+2. Run `npx wrangler deploy --config wrangler.compliance.toml`. The native AI
+   binding uses the Cloudflare account and requires no OpenAI key.
+3. Set the GitHub repository Actions **variable** `VITE_COMPLIANCE_ENDPOINT`
+   to the deployed HTTPS Worker URL ending in `/ask`. Re-run the Pages workflow.
+   This URL is public configuration. Keep credentials out of build variables.
+4. Run `node scripts/test-compliance.mjs` and check the live browser flow with
+   the three fictional sample questions. Confirm that the result says “Live
+   model answer,” each citation opens an exact passage, and the latency is
+   acceptable for the meeting. The search mode stays available for rehearsal
+   and provider outages.
+
+Worker limits apply per Cloudflare location. Use the account's usage controls
+for the provider allowance and remove the repository variable to turn off the
+live mode after the demo. Then redeploy Pages and disable the Worker if unused.

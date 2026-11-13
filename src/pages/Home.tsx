@@ -35,6 +35,7 @@ export default function Home() {
           <p>We build decision workflows, machine learning models, data pipelines, and BI. Start with a fixed-scope project for your business or establish the release standards and controls for a regulated institution.</p>
           <div className="cta-row">
             <a className="btn btn-emerald" href="#/services">Explore services</a>
+            <a className="btn btn-ghost" href="#/compliance">Try the compliance demo</a>
             <a className="btn btn-ghost" href="#/sandbox">Try document Q&amp;A</a>
             <a className="btn btn-ghost" href="#/about">About Noor</a>
           </div>

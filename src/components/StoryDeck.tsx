@@ -117,7 +117,7 @@ example : ProcessContract witness := by decide`} />
         <div className="sd-badge">Illustrative answer</div>
         <p>Yes — up to AED 2.0 million on 90-day terms, if the goods are owned before sale and the buyer passes screening. <span className="sd-cite">[1]</span> <span className="sd-cite">[2]</span></p>
         <div className="sd-cites"><span>[1] Credit policy §3</span><span>[2] Murabaha manual §2</span></div>
-        <a className="btn btn-emerald btn-sm" href="#/sandbox">Ask a sample policy question</a>
+        <a className="btn btn-emerald btn-sm" href="#/compliance">Ask a sample policy question</a>
       </div>
     ),
   },

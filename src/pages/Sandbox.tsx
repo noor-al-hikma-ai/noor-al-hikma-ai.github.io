@@ -282,6 +282,7 @@ export default function Sandbox() {
     <div className="app-page sandbox">
       <div className="app-head">
         <h1>RAG Sandbox</h1>
+        <a className="btn btn-ghost btn-sm" href="#/compliance">Compliance policy demo</a>
         <span className="sub">Ask questions over documents using local retrieval and extractive answers. The browser evaluates CaseSpine rules and simulates cost controls.</span>
       </div>
       <div className="sb-bar">

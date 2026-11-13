@@ -13,6 +13,7 @@ const loaders: Record<Route, () => Promise<{ default: ComponentType }>> = {
   services: () => import("./pages/Services"),
   trust: () => import("./pages/Trust"),
   about: () => import("./pages/About"),
+  compliance: () => import("./pages/Compliance"),
 };
 const pendingPages = new Map<Route, Promise<{ default: ComponentType }>>();
 const pages = new Map<Route, ComponentType>();
@@ -72,7 +73,7 @@ export default function App() {
     if (connection?.saveData || connection?.effectiveType?.includes("2g")) return;
     let active = true;
     const warm = async () => {
-      for (const next of ["sandbox", "studio", "walkthrough", "services", "about", "trust"] as const) {
+      for (const next of ["compliance", "sandbox", "studio", "walkthrough", "services", "about", "trust"] as const) {
         if (!active) return;
         await loadPage(next).catch(() => {});
       }
@@ -153,6 +154,7 @@ export default function App() {
                 <a href="#/services">Services</a>
                 <a href="#/trust">Trust &amp; compliance</a>
                 <a href="#/about">About</a>
+                <a href="#/compliance">Compliance demo</a>
                 <a href="#/brief">Technical brief</a>
               </div>
             </div>

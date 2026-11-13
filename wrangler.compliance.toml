@@ -1,0 +1,20 @@
+name = "noor-compliance-demo"
+main = "server/compliance-worker.mjs"
+compatibility_date = "2026-11-13"
+
+[vars]
+ALLOWED_ORIGIN = "https://noor-al-hikma-ai.github.io"
+COMPLIANCE_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+
+[ai]
+binding = "AI"
+
+[[ratelimits]]
+name = "COMPLIANCE_LIMITER"
+namespace_id = "2101"
+simple = { limit = 6, period = 60 }
+
+[[ratelimits]]
+name = "COMPLIANCE_EDGE_LIMITER"
+namespace_id = "2102"
+simple = { limit = 30, period = 60 }
