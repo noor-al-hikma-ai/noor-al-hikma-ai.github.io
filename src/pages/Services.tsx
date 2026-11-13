@@ -80,9 +80,22 @@ export default function Services() {
       <div className="label" style={{ color: "var(--gold)" }}>Services</div>
       <h1 style={{ maxWidth: 920 }}>Full-stack partnership across the AI solution lifecycle</h1>
       <p className="lede" style={{ maxWidth: 820 }}>
-        From the first conversation about value to a governed system in production — and the people who will run it. Every engagement uses
-        CaseSpine, so what we agree on paper is what gets built.
+        We build decision workflows, ML models, data pipelines, and BI. Each engagement starts with a
+        business outcome, an owner, and a way to measure the result.
       </p>
+      <section aria-label="Engagement options">
+        <h2>For small and mid-sized businesses</h2>
+        <p>Buy a fixed-scope workflow or data product. We agree on the starting metric, success target,
+          and integrations, then deliver a working system, tests, a runbook, and a handover session.</p>
+        <a className="btn btn-emerald" href={contactHref("Noor Al Hikma AI — fixed-scope workflow")}>Scope a workflow</a>
+        <h2>For regulated institutions</h2>
+        <p>Start with a paid assessment of one decision and its controls. Move to a bounded pilot with
+          agreed acceptance criteria, then production delivery or a programme to standardise how you
+          release and monitor models. Typical deliverables include a versioned case, test results,
+          an approval and evidence plan, an operating runbook, and a dashboard for value and cost.</p>
+        <a className="btn btn-emerald" href={contactHref("Noor Al Hikma AI — decision and controls assessment")}>Discuss an assessment</a>
+      </section>
+      <h2>Delivery, training, and advisory services</h2>
       <nav className="svc-toc" aria-label="Services">
         {SERVICES.map((s, i) => (
           <a key={s.id} href={`#/services#${s.id}`}><span>{i + 1}</span>{s.title}</a>

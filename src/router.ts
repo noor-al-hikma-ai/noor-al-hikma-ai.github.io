@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
-export type Route = "home" | "brief" | "walkthrough" | "studio" | "sandbox" | "services" | "trust";
-const ROUTES: Route[] = ["home", "brief", "walkthrough", "studio", "sandbox", "services", "trust"];
+export type Route = "home" | "brief" | "walkthrough" | "studio" | "sandbox" | "services" | "trust" | "about";
+const ROUTES: Route[] = ["home", "brief", "walkthrough", "studio", "sandbox", "services", "trust", "about"];
 const ALIASES: Record<string, Route> = { "": "home", paper: "brief" };
 
 function parse(): { route: Route; anchor?: string } {

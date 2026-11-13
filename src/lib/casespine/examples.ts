@@ -347,6 +347,37 @@ Deployment:
   Identity: [Keycloak OIDC, Microsoft Entra ID]
 `;
 
+export const CARD_DISPUTE_BASE = `Case: Card Dispute Intake
+Solution Archetype: TRANSACTIONAL_SAGA_AND_STRAIGHT_THROUGH_PROCESSING
+Business Deliverable: Dispute Review Packet
+Binding Lean Contract:
+  Rules:
+    - It is obligatory that Reviewer 1 != Reviewer 2 before Milestone ReviewReady.
+`;
+
+export function cardDisputeExample(deadline: number) {
+  return `${CARD_DISPUTE_BASE}
+Subcases:
+  - Subcase: Late Delivery Dispute
+    Business Deliverable: Late Delivery Review Packet
+    Binding Lean Contract:
+      Rules:
+        - It is obligatory that evidence age hours <= ${deadline} before Milestone ReviewReady.
+    Process Flow:
+      - Stage 1 (Prepare review packet):
+          Steps:
+            - Gather merchant and delivery evidence
+            - Assign two reviewers
+          On Breach:
+            Escalate To: Card Operations Lead
+          Exit Gateway (Lean 4 Spine Reference Monitor):
+            If: all Binding Lean Contract rules hold
+            Then: Prepare packet for human review and reach Milestone ReviewReady
+            Else: Halt and Escalate to Card Operations Lead
+          Reach Milestone: ReviewReady
+`;
+}
+
 export interface ExampleDef {
   id: string;
   label: string;
@@ -358,6 +389,7 @@ export interface ExampleDef {
 export const EXAMPLES: ExampleDef[] = [
   { id: "retail-en", label: "Retail wire inquiry · RAG", archetype: "KNOWLEDGE_SYNTHESIS_AND_RAG", src: RETAIL_WIRE_EN },
   { id: "retail-ar", label: "استعلام التحويلات · عربي", archetype: "KNOWLEDGE_SYNTHESIS_AND_RAG", src: RETAIL_WIRE_AR },
+  { id: "card-dispute", label: "Card dispute · Review packet", archetype: "TRANSACTIONAL_SAGA_AND_STRAIGHT_THROUGH_PROCESSING", src: cardDisputeExample(72) },
   { id: "sovereign", label: "Sovereign group · 3-level hierarchy", archetype: "KNOWLEDGE_SYNTHESIS_AND_RAG", src: SOVEREIGN_GROUP },
   { id: "coldchain", label: "Cold-chain dispatch · MILP", archetype: "QUANTITATIVE_OPTIMIZATION_AND_MILP", src: COLD_CHAIN_MILP },
   { id: "devops", label: "API hardening · Code fork", archetype: "AUTONOMOUS_CODE_AND_DEVOPS_FORK", src: CODE_FORK_DEVOPS },

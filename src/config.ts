@@ -2,16 +2,18 @@
 export const SITE = {
   name: "Noor Al Hikma AI",
   nameAr: "نور الحكمة",
+  legalName: "Noor Al Hikma AI FZE LLC",
+  licenseNumber: "262957451888",
   tagline: "The business case is the program.",
   taglineAr: "دراسة الحالة هي البرنامج",
   // Shown in the founder line on the paper page. Set to "" to hide.
-  founderLine: "Founded by the former Head of AI at Techcombank.",
+  founderLine: "Founded by Alexey Miasnikov, former Head of Analytics & Innovation at Techcombank.",
   location: "Abu Dhabi · Dubai",
   // Where "Request a pilot" / "Book a call" buttons go. Use a mailto: or a booking URL.
   // Leave empty to point buttons at the Services page contact block instead.
   contactUrl: "",
   contactEmail: "olddaos@gmail.com",
-  linkedin: "",
+  linkedin: "https://www.linkedin.com/in/alexey-miasnikov-4624b9a/",
   github: "",
   // Landing-page films. Put files in public/videos/ (e.g. dawn.webm + dawn.mp4 + dawn.jpg)
   // and set the base path here, e.g. dawn: "videos/dawn". Empty = animated stand-in.

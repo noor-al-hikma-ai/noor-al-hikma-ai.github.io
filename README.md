@@ -6,12 +6,13 @@ browser: there is no backend, no cookies and no analytics, and fonts are self-ho
 
 | Page | URL | What it does |
 | --- | --- | --- |
-| Home | `#/` | Cinematic landing: hero film, four chapters of one customer's morning, the same morning for three others, specifications, the step-by-step deck and the call to action. Film slots play your clips when configured (see VIDEO_PROMPTS.md), otherwise animated scenes. |
+| Home | `#/` | CaseSpine overview, interactive card dispute example, founder track record, and links to services and demos. |
 | How it works | `#/walkthrough` | The same story as full-screen slides with code examples; arrow keys / swipe; `#/walkthrough#5` deep-links a slide. |
 | Studio | `#/studio` | ✨ Copilot (plain English/Arabic → CaseSpine draft, assumptions, clarifying questions, rephrasing tips); editor with grey ghost-text suggestions (Tab), completion, ▾ dropdowns and hover quick-picks; Orange-style canvas with a searchable widget palette and a config form for every widget; ▶ Compile (⌘/Ctrl+Enter); Lean 4, Z3, LangGraph, BPMN, AWS, Google Cloud, Databricks, Kubernetes and IR outputs; `.csar` download. |
 | RAG Sandbox | `#/sandbox` | Ask works straight away (sample policies load automatically) or upload PDF / DOCX / TXT / MD / HTML; UAE PII redaction, BM25 + SVD + RRF retrieval, ROI guards, Lean exit gateway, "did you mean" and suggested questions, human escalation queue, tamper-evident audit ledger. Every `Config:` value in the case changes its behaviour. |
 | Services | `#/services` | Seven services, each with its own interactive widget. |
 | Trust & Compliance | `#/trust` | Regulation → control → evidence mapping for UAE banks, integrations, security posture. |
+| About | `#/about` | Founder, track record, CaseSpine for business owners, and company registration. |
 | Technical brief | `#/brief` | The NeurIPS-style technical paper for engineers and architects. |
 
 ### CaseSpine `Config:` sections

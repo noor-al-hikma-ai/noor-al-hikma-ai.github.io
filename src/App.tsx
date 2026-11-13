@@ -11,6 +11,7 @@ const Studio = lazy(() => import("./pages/Studio"));
 const Sandbox = lazy(() => import("./pages/Sandbox"));
 const Services = lazy(() => import("./pages/Services"));
 const Trust = lazy(() => import("./pages/Trust"));
+const About = lazy(() => import("./pages/About"));
 
 const NAV: { route: Route; label: string }[] = [
   { route: "walkthrough", label: "How it works" },
@@ -18,6 +19,7 @@ const NAV: { route: Route; label: string }[] = [
   { route: "sandbox", label: "RAG Sandbox" },
   { route: "services", label: "Services" },
   { route: "trust", label: "Trust & Compliance" },
+  { route: "about", label: "About" },
 ];
 
 export default function App() {
@@ -57,7 +59,7 @@ export default function App() {
         </button>
         <nav className={`nav-links${open ? " open" : ""}`}>
           {NAV.map((n) => (
-            <a key={n.route} href={`#/${n.route}`} className={route === n.route ? "active" : ""}>
+            <a key={n.route} href={`#/${n.route}`} className={route === n.route ? "active" : ""} aria-current={route === n.route ? "page" : undefined}>
               {n.label}
             </a>
           ))}
@@ -75,6 +77,7 @@ export default function App() {
           {route === "sandbox" && <Sandbox />}
           {route === "services" && <Services />}
           {route === "trust" && <Trust />}
+          {route === "about" && <About />}
         </Suspense>
       </main>
       {route !== "studio" && (
@@ -91,6 +94,7 @@ export default function App() {
                 <a href="#/walkthrough">How it works</a>
                 <a href="#/services">Services</a>
                 <a href="#/trust">Trust &amp; compliance</a>
+                <a href="#/about">About</a>
                 <a href="#/brief">Technical brief</a>
               </div>
             </div>
