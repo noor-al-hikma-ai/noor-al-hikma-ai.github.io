@@ -97,7 +97,7 @@ export function CaseCanvas({ ast, editable, highlightLines, onSelectLines, onEdi
     const k = Math.min(1.25, Math.max(0.35, Math.min(w / (maxX - minX), h / (maxY - minY))));
     const tx = (w - (maxX - minX) * k) / 2 - minX * k;
     const ty = (h - (maxY - minY) * k) / 2 - minY * k;
-    select(svg).transition().duration(450).call(zoomRef.current.transform, zoomIdentity.translate(tx, ty).scale(k));
+    select(svg).interrupt().transition().duration(450).call(zoomRef.current.transform, zoomIdentity.translate(tx, ty).scale(k));
   };
 
   useEffect(() => {
@@ -105,6 +105,7 @@ export function CaseCanvas({ ast, editable, highlightLines, onSelectLines, onEdi
     if (!svg) return;
     const z = zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.25, 2.5])
+      .extent(() => [[0, 0], [svg.clientWidth, svg.clientHeight]])
       .filter((ev: Event) => {
         if ((ev as MouseEvent).button) return false;
         if ((ev.target as Element).closest?.(".cv-node")) return false;
@@ -116,7 +117,8 @@ export function CaseCanvas({ ast, editable, highlightLines, onSelectLines, onEdi
     zoomRef.current = z;
     select(svg).call(z).on("dblclick.zoom", null);
     return () => {
-      select(svg).on(".zoom", null);
+      select(svg).interrupt().on(".zoom", null);
+      zoomRef.current = null;
     };
   }, [compact]);
 
