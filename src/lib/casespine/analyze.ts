@@ -6,7 +6,7 @@ import { hasArabic, normalizeArabic } from "./arabic";
 import { compileRule } from "./rules";
 import { componentSpec, fieldSpec, normName, parseInlineMap, validateField } from "./configSchema";
 import { buildTree, normKey, parseList, unquote, type SpecNode } from "./tree";
-import { keysFor, matchKeywords, type Level } from "./suggest";
+import { isRepeatableBlock, keysFor, matchKeywords, type Level } from "./suggest";
 import type { CaseAST, CaseFile, Clause, CompileResult, CompiledRule, Diagnostic, Guards, Lane, Stage } from "./types";
 
 const KNOWN_KEYS = new Set([
@@ -182,16 +182,22 @@ function invalidField(node: SpecNode, level: Level, context: string, diags: Diag
   });
 }
 
-function readStages(n: SpecNode, diags: Diagnostic[]): Stage[] {
-  const stages: Stage[] = [];
+function readStages(n: SpecNode, stages: Stage[], diags: Diagnostic[]) {
+  const indices = new Set(stages.map((stage) => stage.idx));
   for (const item of n.children) {
     const sm = /^Stage\s+(\d+)\s*(?:\((.*)\))?$/i.exec(item.key ?? "");
     if (!sm || item.value) {
       diags.push({ line: item.line, severity: "error", message: "Process Flow items should look like `- Stage 1 (Name):`." });
       continue;
     }
+    const idx = parseInt(sm[1], 10);
+    if (indices.has(idx)) {
+      diags.push({ line: item.line, severity: "error", message: `Stage ${idx} already exists in this case. Give this stage a new number.` });
+      continue;
+    }
+    indices.add(idx);
     const st: Stage = {
-      idx: parseInt(sm[1], 10),
+      idx,
       name: (sm[2] ?? `Stage ${sm[1]}`).trim(),
       line: item.line,
       endLine: item.endLine,
@@ -199,8 +205,18 @@ function readStages(n: SpecNode, diags: Diagnostic[]): Stage[] {
       steps: [],
       milestone: "StageCompleted",
     };
+    const settings = new Set<string>();
     for (const f of item.children) {
       const k = normKey(f.key);
+      // The short Escalate To form sets the same policy as On Breach.
+      const setting = k === "escalate to" ? "on breach" : k;
+      if (["on breach", "exit gateway"].includes(setting)) {
+        if (settings.has(setting)) {
+          diags.push({ line: f.line, severity: "error", message: `Use one ${setting === "on breach" ? "breach escalation" : "Exit Gateway"} per stage.` });
+          continue;
+        }
+        settings.add(setting);
+      }
       if (k === "when") {
         st.when = f.value ?? "";
         if (!st.when) diags.push({ line: f.line, severity: "error", message: "Describe when this stage starts." });
@@ -208,8 +224,8 @@ function readStages(n: SpecNode, diags: Diagnostic[]): Stage[] {
       else if (k === "engine") st.engine = f.value;
       else if (k === "steps") {
         st.stepsLine = f.line;
-        st.steps = f.children.map((s) => ({ text: s.text, norm: s.text, line: s.line }));
-        if (f.value || !st.steps.length) diags.push({ line: f.line, severity: "error", message: "Add at least one indented step under `Steps:`." });
+        st.steps.push(...f.children.map((s) => ({ text: s.text, norm: s.text, line: s.line })));
+        if (f.value || !f.children.length) diags.push({ line: f.line, severity: "error", message: "Add at least one indented step under `Steps:`." });
       } else if (k === "on breach") {
         for (const child of f.children) if (normKey(child.key) !== "escalate to") invalidField(child, "breach", "On Breach", diags);
         const esc = f.children.find((c) => normKey(c.key) === "escalate to");
@@ -242,7 +258,6 @@ function readStages(n: SpecNode, diags: Diagnostic[]): Stage[] {
     if (!st.stepsLine) diags.push({ line: item.line, severity: "error", message: "Add a `Steps:` block to this stage." });
     stages.push(st);
   }
-  return stages;
 }
 
 interface Ctx {
@@ -299,12 +314,14 @@ function analyzeCase(
   const { diags } = ctx;
   const subNodes: SpecNode[] = [];
   const usedSections = new Set<string>();
+  const localLanes = new Set<string>();
+  const caseFiles = new Set<string>();
 
   for (const n of body) {
     const k = normKey(n.key);
     const v = n.value ?? "";
     if (CASE_BLOCKS.has(k) || k === "case") {
-      if (usedSections.has(k) || k === "case") {
+      if (k === "case" || (usedSections.has(k) && !isRepeatableBlock(k))) {
         diags.push({ line: n.line, severity: "error", message: `Use one \`${n.key}:\` per case. Move these entries into the existing block.` });
         continue;
       }
@@ -334,10 +351,27 @@ function analyzeCase(
         node.population = v.trim();
         break;
       case "lanes":
-        node.lanes = [...node.lanes.filter((l) => !n.children.some((c) => c.key === l.name)), ...readLanes(n, diags)];
+        for (const lane of readLanes(n, diags)) {
+          const name = lane.name.toLowerCase();
+          if (localLanes.has(name)) {
+            diags.push({ line: lane.line, severity: "error", message: `Lane "${lane.name}" already exists in this case. Give this lane a different name.` });
+            continue;
+          }
+          localLanes.add(name);
+          node.lanes = node.lanes.filter((l) => l.name.toLowerCase() !== name);
+          node.lanes.push(lane);
+        }
         break;
       case "case file":
-        node.caseFiles = readCaseFiles(n, diags);
+        for (const file of readCaseFiles(n, diags)) {
+          const name = file.name.toLowerCase();
+          if (caseFiles.has(name)) {
+            diags.push({ line: file.line, severity: "error", message: `Case File "${file.name}" already exists in this case. Give this collection a different name.` });
+            continue;
+          }
+          caseFiles.add(name);
+          node.caseFiles.push(file);
+        }
         break;
       case "binding lean contract": {
         node.contractLine = n.line;
@@ -383,7 +417,7 @@ function analyzeCase(
         break;
       case "process flow":
         node.processFlowLine = n.line;
-        node.stages = readStages(n, diags);
+        readStages(n, node.stages, diags);
         break;
       case "actuators":
         for (const c of n.children) {
@@ -444,12 +478,20 @@ function analyzeCase(
     }
   }
 
+  const subcaseSlugs = new Set<string>();
   for (const s of subNodes) {
     const isSub = /^subcase$/i.test(normKey(s.key));
     if (!isSub) {
       diags.push({ line: s.line, severity: "warning", message: "Subcases entries should start with `- Subcase: <Name>`." });
       continue;
     }
+    const name = s.value ? unquote(s.value) : "Unnamed Case";
+    const slug = slugify(name);
+    if (subcaseSlugs.has(slug)) {
+      diags.push({ line: s.line, severity: "error", message: `Subcase "${name}" shares an existing namespace. Give this subcase a different name.` });
+      continue;
+    }
+    subcaseSlugs.add(slug);
     node.subcases.push(analyzeCase(s, s.children, "Subcase", node, ctx));
   }
   return node;

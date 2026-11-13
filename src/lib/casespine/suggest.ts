@@ -6,6 +6,7 @@
 import { AR_KEYS, hasArabic } from "./arabic";
 import { COMPONENTS, componentSpec, fieldSpec, formatValue, inlineDefaults, normName } from "./configSchema";
 import { normKey, parseList } from "./tree";
+import type { CaseAST } from "./types";
 import { ACTUATOR_FIELDS, CONSTRAINT_FACETS, KEYWORDS, PII_ENTITIES, RULE_TEMPLATES, STEP_TEMPLATES, VALUE_SUGGESTIONS } from "./vocab";
 
 export interface SuggestContext {
@@ -15,9 +16,39 @@ export interface SuggestContext {
   clearances?: string[];
   caseFiles?: string[];
   approvers?: string[];
-  stages?: { idx: number; milestone: string; line: number }[];
-  stage?: { idx: number; milestone: string; line: number };
+  stages?: StageContext[];
+  stage?: StageContext;
+  subcases?: string[];
+  rules?: string[];
+  constraints?: string[];
   subcaseBudget?: { tokens: number; usd: number };
+}
+
+interface StageContext {
+  idx: number;
+  milestone: string;
+  line: number;
+  steps?: { text: string }[];
+}
+
+export function contextForCase(c: CaseAST | null, stage?: StageContext): SuggestContext {
+  const stages = c?.stages ?? [];
+  return {
+    roles: c?.lanes.flatMap((lane) => lane.roles),
+    clearances: c?.lanes.flatMap((lane) => lane.clearance),
+    caseFiles: c?.caseFiles.map((file) => file.name),
+    lanes: c?.lanes.map((lane) => lane.name) ?? [],
+    approvers: c?.lanes.filter((lane) => lane.roles.some((role) => /HITM|APPROVER/i.test(role))).map((lane) => lane.name),
+    milestones: [...new Set(stages.map((item) => item.milestone))],
+    stages, stage,
+    subcases: c?.subcases.map((item) => item.name),
+    rules: c?.rules.map((rule) => rule.raw),
+    constraints: c?.constraints.map((item) => item.facet),
+    subcaseBudget: c ? {
+      tokens: Math.max(0, c.guards.budgetTokens - c.subcases.reduce((used, subcase) => used + subcase.guards.budgetTokens, 0)),
+      usd: Math.max(0, c.guards.budgetUsd - c.subcases.reduce((used, subcase) => used + subcase.guards.budgetUsd, 0)),
+    } : undefined,
+  };
 }
 
 const AR_TO_EN = new Map(Object.entries(AR_KEYS));
@@ -26,6 +57,13 @@ export const translateKey = (k: string) => AR_TO_EN.get(k.trim()) ?? k;
 const KEY_RE = /^(\s*)(-\s+)?([^:"'[{#\s][^:]*?):(?:\s(.*))?$/;
 
 export const keywordId = (key: string) => normKey(translateKey(key));
+
+const COLLECTION_BLOCKS = new Set([
+  "lanes", "case file", "binding lean contract", "rules", "process flow", "steps",
+  "subcases", "ai smart suggestions", "business & product constraints",
+]);
+
+export const isRepeatableBlock = (key: string) => COLLECTION_BLOCKS.has(keywordId(key));
 
 export function indentOf(line: string) {
   return line.length - line.trimStart().length;
@@ -148,36 +186,60 @@ const approver = (ctx: SuggestContext) => ctx.approvers?.[0] ?? ctx.lanes[0] ?? 
 
 export const laneBlock = (name: string) => [`${name}:`, "  SSO Provider: Microsoft Entra ID", "  Roles: [HITM_APPROVER]"];
 
-export function sectionBlock(key: string, ctx: SuggestContext): string[] | null {
+function availableNames(choices: string[], used: string[]) {
+  const existing = new Set(used.map((name) => name.toLowerCase()));
+  const available = choices.filter((name) => !existing.has(name.toLowerCase()));
+  if (available.length) return available;
+  const base = choices.at(-1)!;
+  let suffix = 2;
+  while (existing.has(`${base} ${suffix}`.toLowerCase())) suffix++;
+  return [`${base} ${suffix}`];
+}
+
+export const laneNames = (ctx: SuggestContext) => availableNames(["Case Owner", "Head of Compliance", "Compliance Reviewer"], ctx.lanes);
+export const documentNames = (ctx: SuggestContext) => availableNames(["Documents", "Policy Documents", "Evidence File"], ctx.caseFiles ?? []);
+
+function starterRule(ctx: SuggestContext) {
+  const milestone = lastMs(ctx);
+  const rules = [
+    `It is obligatory that citation coverage >= 90% before Milestone ${milestone}.`,
+    ...RULE_TEMPLATES.map((rule) => rule.text.replace("${Milestone}", milestone)),
+  ];
+  return rules.find((rule) => !ctx.rules?.includes(rule)) ?? rules[0];
+}
+
+export function sectionBlock(key: string, ctx: SuggestContext, line?: number): string[] | null {
   switch (keywordId(key)) {
     case "lanes":
-      return laneBlock("Case Owner").map((line) => "  " + line);
+      return laneBlock(laneNames(ctx)[0]).map((line) => "  " + line);
     case "case file":
-      return ["  Documents:", '    Source: pdf("documents.pdf")', "    Curation: redact [UAE_IBAN, EMIRATES_ID] and require coherence >= 0.85"];
+      return [`  ${documentNames(ctx)[0]}:`, '    Source: pdf("documents.pdf")', "    Curation: redact [UAE_IBAN, EMIRATES_ID] and require coherence >= 0.85"];
     case "binding lean contract":
-      return ["  Rules (SBVR & FEEL Constrained English):", `    - It is obligatory that citation coverage >= 90% before Milestone ${lastMs(ctx)}.`];
+      return ["  Rules (SBVR & FEEL Constrained English):", `    - ${starterRule(ctx)}`];
     case "rules":
-      return [`  - It is obligatory that citation coverage >= 90% before Milestone ${lastMs(ctx)}.`];
+      return [`  - ${starterRule(ctx)}`];
     case "cost & traffic guards":
       return ["  Budget Ceiling: 4000 tokens or $0.10", "  Rate Limit: 30 requests/minute per Lane", "  Banned Topics: [investment advice]"];
     case "process flow":
-      return stageBlock({ ...ctx, stages: [] }).map((line) => "  " + line);
+      return stageBlock(ctx, line === undefined ? undefined : milestoneBefore(ctx, line)).map((line) => "  " + line);
     case "config":
       return ["  Retriever: { Mode: hybrid, Top K: 3 }", "  Synthesizer: { Model: auto, Max Sentences: 3 }", "  Exit Gateway: { Fail Mode: fail-closed }"];
     case "deployment":
       return ["  Cloud: azure://uaenorth", "  Residency: UAE", "  Identity: [Microsoft Entra ID, UAE PASS]"];
     case "steps":
-      return ["  - " + STEP_TEMPLATES[0]];
+      return ["  - " + (STEP_TEMPLATES.find((step) => !ctx.stage?.steps?.some((used) => used.text === step)) ?? "Review the case evidence")];
     case "on breach":
       return [`  Escalate To: ${approver(ctx)}`];
     case "exit gateway":
       return ["  If: all Binding Lean Contract rules hold", `  Then: Emit Verified Answer and reach Milestone ${lastMs(ctx)}`, '  Else: Halt loudly and Compensate via "Quarantine Output"'];
-    case "business & product constraints":
-      return [`  Compliance: ${CONSTRAINT_FACETS[0].example}`];
+    case "business & product constraints": {
+      const facet = CONSTRAINT_FACETS.find(({ key }) => !ctx.constraints?.some((used) => keywordId(used) === keywordId(key))) ?? CONSTRAINT_FACETS[0];
+      return [`  ${facet.key}: ${facet.example}`];
+    }
     case "actuators":
       return [`  Orchestrator: ${ACTUATOR_FIELDS[0].example}`];
     case "subcases":
-      return subcaseBlock(ctx).map((line) => "  " + line);
+      return ctx.subcaseBudget?.tokens === 0 ? null : subcaseBlock(ctx).map((line) => "  " + line);
     case "ai smart suggestions":
       return ["  " + proposalText(ctx)];
     default:
@@ -200,6 +262,8 @@ export function hasFollowingChildren(lines: string[], lineIdx: number, indent: n
   return !!following && indentOf(following) > indent;
 }
 
+export const milestoneBefore = (ctx: SuggestContext, line: number) => ctx.stages?.filter((stage) => stage.line < line).at(-1)?.milestone ?? null;
+
 export function stageBlock(ctx: SuggestContext, previous: string | null | undefined = ctx.stages?.at(-1)?.milestone): string[] {
   const n = Math.max(0, ...(ctx.stages ?? []).map((stage) => stage.idx)) + 1;
   const existing = new Set(ctx.stages?.map((stage) => stage.milestone));
@@ -215,8 +279,9 @@ export function stageBlock(ctx: SuggestContext, previous: string | null | undefi
   ];
 }
 
-export function subcaseBlock(ctx: SuggestContext, name = "Additional Review"): string[] {
+export function subcaseBlock(ctx: SuggestContext): string[] {
   const { tokens, usd } = ctx.subcaseBudget ?? { tokens: 1000, usd: 0.05 };
+  const [name] = availableNames(["Additional Review"], ctx.subcases ?? []);
   return [`- Subcase: ${name}`, `  Budget Ceiling: ${Math.min(1000, tokens)} tokens or $${Math.min(0.05, usd).toFixed(2)}`];
 }
 export const proposalText = (ctx: SuggestContext) =>
@@ -342,8 +407,8 @@ export function keywordBeforeColon(text: string) {
   return { query: (colon < 0 ? content : content.slice(0, colon)).trim(), value: colon < 0 ? undefined : content.slice(colon + 1).trim() };
 }
 
-export function keyLine(key: string, lvl: Level, anc: string[], ctx: SuggestContext): string {
-  const block = sectionBlock(key, ctx);
+export function keyLine(key: string, lvl: Level, anc: string[], ctx: SuggestContext, line?: number): string {
+  const block = sectionBlock(key, ctx, line);
   if (block && lvl !== "config") return ":\n" + block.join("\n");
   if (lvl === "config") {
     const spec = componentSpec(key);
@@ -374,6 +439,7 @@ export function suggestContinuation(doc: string, pos: number, ctx: SuggestContex
   const prefix = before.slice(lineStart);
   const lines = doc.split("\n");
   const lineIdx = before.split("\n").length - 1;
+  const line = lineIdx + 1;
   const indent = indentOf(prefix);
   const anc = ancestorsAt(lines, lineIdx, indent);
   const lvl = levelOf(anc);
@@ -381,7 +447,9 @@ export function suggestContinuation(doc: string, pos: number, ctx: SuggestContex
   // A block header behaves the same before and after trailing spaces.
   const bare = KEY_RE.exec(prefix);
   if (bare && !bare[4]?.trim() && !["steps", "rules", "proposals"].includes(lvl)) {
-    const block = sectionBlock(bare[3], ctx);
+    const id = keywordId(bare[3]);
+    if (!isRepeatableBlock(id) && siblingKeys(lines, lineIdx, indent).has(id)) return null;
+    const block = sectionBlock(bare[3], ctx, line);
     // Do not prepend defaults to a block that already has children.
     if (block) {
       if (canSeedBlock(lines, lineIdx, indent)) {
@@ -418,15 +486,15 @@ export function suggestContinuation(doc: string, pos: number, ctx: SuggestContex
     }
     if (lvl === "process" || lvl === "subcases" || lvl === "proposals") {
       if (lvl === "subcases" && ctx.subcaseBudget?.tokens === 0) return null;
-      const block = lvl === "process" ? stageBlock(ctx, ctx.stages?.filter((stage) => stage.line <= lineIdx).at(-1)?.milestone ?? null) : lvl === "subcases" ? subcaseBlock(ctx) : [proposalText(ctx)];
+      const block = lvl === "process" ? stageBlock(ctx, milestoneBefore(ctx, line)) : lvl === "subcases" ? subcaseBlock(ctx) : [proposalText(ctx)];
       const full = listItem(block, true);
       // An inline continuation cannot insert a missing list dash before existing text.
       return dash && full.toLowerCase().startsWith(low) ? full.slice(typed.length) || null : null;
     }
     const present = siblingKeys(lines, lineIdx, indent);
-    const hit = matchKeywords(lvl, anc, typed).find(({ key, label }) => !present.has(keywordId(key)) && label.toLowerCase().startsWith(low));
+    const hit = matchKeywords(lvl, anc, typed).find(({ key, label }) => (isRepeatableBlock(key) || !present.has(keywordId(key))) && label.toLowerCase().startsWith(low));
     if (!hit) return null;
-    return hit.label.slice(typed.length) + keyLine(hit.key, lvl, anc, ctx);
+    return hit.label.slice(typed.length) + keyLine(hit.key, lvl, anc, ctx, line);
   }
 
   // C. empty line → next most likely line or block
@@ -438,7 +506,7 @@ export function suggestContinuation(doc: string, pos: number, ctx: SuggestContex
       if (!/^\s*(Case|الحالة)\s*:/m.test(doc)) return "Case: My Business Case";
       const order = ["Lanes", "Case File", "Process Flow", "Binding Lean Contract", "Business & Product Constraints", "Cost & Traffic Guards", "Config", "Deployment"];
       const next = order.find((k) => !present.has(normKey(k)));
-      return next ? next + ":\n" + sectionBlock(next, ctx)!.join("\n") : null;
+      return next ? next + ":\n" + sectionBlock(next, ctx, line)!.join("\n") : null;
     }
     case "rules": {
       const used = lines.join("\n").toLowerCase();
@@ -451,16 +519,15 @@ export function suggestContinuation(doc: string, pos: number, ctx: SuggestContex
       return t ? prefixDash + t : null;
     }
     case "process":
-      return listItem(stageBlock(ctx, ctx.stages?.filter((stage) => stage.line <= lineIdx).at(-1)?.milestone ?? null), dash);
+      return listItem(stageBlock(ctx, milestoneBefore(ctx, line)), dash);
     case "subcases":
       return ctx.subcaseBudget?.tokens === 0 ? null : listItem(subcaseBlock(ctx), dash);
     case "proposals":
       return present.has("suggest policy_review") ? null : listItem([proposalText(ctx)], dash);
     case "lane-name":
-      return ["Case Owner", "Head of Compliance", "Compliance Reviewer"].filter((name) => !present.has(keywordId(name)))
-        .map((name) => laneBlock(name).join("\n"))[0] ?? null;
+      return laneBlock(laneNames(ctx)[0]).join("\n");
     case "cf-name":
-      return 'Additional Documents:\n  Source: pdf("more.pdf")';
+      return `${documentNames(ctx)[0]}:\n  Source: pdf("documents.pdf")`;
     case "config": {
       const next = COMPONENTS.find((c) => !present.has(normName(c.name)) && !present.has(normKey(c.name)));
       return next ? `${next.name}: ${inlineDefaults(next)}` : null;

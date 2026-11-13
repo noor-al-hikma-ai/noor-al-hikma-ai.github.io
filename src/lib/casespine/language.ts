@@ -15,9 +15,9 @@ import { buildTree, normKey } from "./tree";
 import { KEYWORDS, PII_ENTITIES, RULE_TEMPLATES, STEP_TEMPLATES } from "./vocab";
 import type { CompileResult } from "./types";
 import { COMPONENTS, componentSpec, fieldSpec, formatValue, inlineDefaults } from "./configSchema";
-import { ancestorsAt, canSeedBlock, indentOf, indentSuggestion, keyLine, keywordId, laneBlock, lastMs, levelOf, listOptions, proposalText, sectionBlock, siblingKeys, stageBlock, subcaseBlock, translateKey, valueOptions, type Level } from "./suggest";
-import { contextFrom, currentDraft, dropdowns, ghostText, goToKeyword, openOptions, rtlLines, showIntentDraft, takeUnfilteredOptions, useKeywordHelp } from "./assist";
-import { applyRepair, checkedRepair, collectDraftIssues, commentFragment, intentChoices, keywordHelp, validatedIntentRepair, type DraftIssue, type Repair } from "./repairs";
+import { ancestorsAt, documentNames, indentOf, indentSuggestion, isRepeatableBlock, keyLine, keywordId, laneBlock, laneNames, lastMs, levelOf, listOptions, milestoneBefore, proposalText, sectionBlock, siblingKeys, stageBlock, subcaseBlock, translateKey, valueOptions, type Level } from "./suggest";
+import { applyEditorRepair, contextFrom, currentDraft, dropdowns, ghostText, goToKeyword, openOptions, rtlLines, showIntentDraft, takeUnfilteredOptions, useKeywordHelp } from "./assist";
+import { applyRepair, checkedRepair, collectDraftIssues, commentFragment, intentChoices, keywordHelp, validatedIntentRepair, type DraftIssue } from "./repairs";
 import { draftIntent, draftLocalFallback, type IntentDraft } from "./intent";
 import { requestLiveModel } from "../liveModel";
 
@@ -143,14 +143,19 @@ function caseSpineCompletions(ctx: CompletionContext): CompletionResult | null {
   if (!tailOfLine.trim() && before.trim()) {
     const snapshot = lines.join("\n");
     const suggestions = keywordHelp(lines, line.number, sctx, () => buildTree(res.normalized))
-      .filter(({ repair }) => !repair || checkedRepair(snapshot, res, repair));
-    if (suggestions.length) return {
-      from: line.from + indent, to: line.to, filter: false,
-      options: suggestions.map((suggestion) => ({
-        label: suggestion.label, detail: suggestion.detail, info: suggestion.message,
-        type: "keyword", apply: (view) => useKeywordHelp(view, suggestion, snapshot),
-      })),
-    };
+      .filter(({ repair }) => repair ? checkedRepair(snapshot, res, repair) : ctx.explicit);
+    if (suggestions.length) {
+      // Enter can start a manually named entry once the header has been typed.
+      const header = lineKey(before);
+      if (!ctx.explicit && header && before.trimEnd().endsWith(":") && isRepeatableBlock(header.key)) return null;
+      return {
+        from: line.from + indent, to: line.to, filter: false,
+        options: suggestions.map((suggestion) => ({
+          label: suggestion.label, detail: suggestion.detail, info: suggestion.message,
+          type: "keyword", apply: (view) => useKeywordHelp(view, suggestion, snapshot),
+        })),
+      };
+    }
   }
 
   // Milestone names anywhere after "Milestone "
@@ -220,15 +225,6 @@ function caseSpineCompletions(ctx: CompletionContext): CompletionResult | null {
 
   if (kv && level !== "rules" && level !== "steps") {
     const typed = kv[2];
-    const block = !typed && !tailOfLine.trim() && canSeedBlock(lines, line.number - 1, indent) ? sectionBlock(kv[1], sctx) : null;
-    if (block && !showAll) return {
-      from: ctx.pos,
-      options: [{
-        label: `Start ${kv[1]}`,
-        apply: indentSuggestion("\n" + block.join("\n"), indent),
-        detail: "insert an editable example",
-      }],
-    };
     if (typed.startsWith("[") && typed.includes("]") && !showAll) return null;
     const opts = valueOptions(level === "stage" && keywordId(kv[1]) === "on breach" && typed ? "Escalate To" : kv[1], anc, sctx);
     if (!opts.length) return null;
@@ -266,7 +262,7 @@ function caseSpineCompletions(ctx: CompletionContext): CompletionResult | null {
     return { from, to: line.to, options: STEP_TEMPLATES.map((st) => ({ label: st, apply: item(st), type: "method", detail: classifyStep(st).map((k) => KIND_META[k.kind].engine).join(" ") })) };
   }
   if (level === "lane-name" || level === "cf-name") {
-    const names = level === "lane-name" ? ["Case Owner", "Head of Compliance", "Compliance Reviewer"] : ["Policy Documents", "Evidence File"];
+    const names = level === "lane-name" ? laneNames(sctx) : documentNames(sctx);
     const used = siblingKeys(lines, line.number - 1, indent);
     return { from, to: line.to, options: names.filter((name) => !used.has(keywordId(name))).map((name) => ({
       label: name,
@@ -280,8 +276,7 @@ function caseSpineCompletions(ctx: CompletionContext): CompletionResult | null {
     return { from, to: line.to, options: [{ label: "Suggest policy review", apply: blockItem([proposalText(sctx)]), type: "class" }] };
   if (level === "other") return null;
   if (level === "process") {
-    const previous = sctx.stages?.filter((stage) => stage.line < line.number).at(-1)?.milestone;
-    const block = stageBlock(sctx, previous ?? null);
+    const block = stageBlock(sctx, milestoneBefore(sctx, line.number));
     return {
       from,
       to: line.to,
@@ -289,18 +284,26 @@ function caseSpineCompletions(ctx: CompletionContext): CompletionResult | null {
     };
   }
   const present = siblingKeys(lines, line.number - 1, indent);
-  const opts = keyCompletions(level, anc, ar).filter((option) => !present.has(keywordId(option.label))
-    && !(res.root && keywordId(option.label) === "case")).map((option) => {
+  const prefix = head[2].trim().toLowerCase();
+  const snapshot = lines.join("\n");
+  const opts = keyCompletions(level, anc, ar).flatMap((option) => {
+    if (prefix && !showAll && !option.label.toLowerCase().startsWith(prefix)) return [];
+    const id = keywordId(option.label);
+    const existing = present.has(id);
+    if ((res.root && id === "case") || (id === "subcases" && sctx.subcaseBudget?.tokens === 0)) return [];
+    if (existing && !(isRepeatableBlock(id) && (ctx.explicit || prefix))) return [];
     const key = translateKey(option.label);
-    return { ...option, apply: indentSuggestion(option.label + keyLine(key, level, anc, sctx), indent) };
+    const insert = indentSuggestion(option.label + keyLine(key, level, anc, sctx, line.number), indent);
+    const repair = { label: option.label, line: line.number, from: from - line.from, to: line.length, insert };
+    if (existing && !checkedRepair(snapshot, res, repair)) return [];
+    return [{ ...option, apply: insert, detail: existing ? "new block" : option.detail }];
   });
   if (!res.root && level === "top") {
     return { from, options: opts.filter((option) => translateKey(option.label) === "Case").map((option) => ({
       ...option, apply: option.label + ": My Business Case",
     })) };
   }
-  const prefix = head[2].trim().toLowerCase();
-  return { from, to: line.to, filter: false, options: prefix && !showAll ? opts.filter((option) => option.label.toLowerCase().startsWith(prefix)) : opts };
+  return { from, to: line.to, filter: false, options: opts };
 }
 
 // ------------------------------------------------------------------ hover
@@ -405,7 +408,7 @@ const hover = hoverTooltip((view, pos) => {
         let after = line.number;
         while (after < lines.length && lines[after].trim() && indentOf(lines[after]) > k.indent) after++;
         const from = view.state.doc.line(after).to;
-        const insert = "\n" + " ".repeat(k.indent) + indentSuggestion(sib + keyLine(translateKey(sib), level, anc, sctx), k.indent);
+        const insert = "\n" + " ".repeat(k.indent) + indentSuggestion(sib + keyLine(translateKey(sib), level, anc, sctx, after + 1), k.indent);
         view.dispatch({ changes: { from, insert }, selection: { anchor: from + insert.length }, userEvent: "input.complete" });
         view.focus();
       };
@@ -428,31 +431,14 @@ function isModelIntent(value: unknown): value is { command?: string; choice?: st
     || ("choice" in value && (value.choice === null || typeof value.choice === "string")));
 }
 
-function applyEditorRepair(view: EditorView, snapshot: string, repair: Repair) {
-  if (view.state.doc.toString() !== snapshot) return;
-  const changes = view.state.changes([repair, ...(repair.more ?? [])].map((edit) => {
-    const line = view.state.doc.line(edit.line);
-    return { from: line.from + edit.from, to: line.from + edit.to, insert: edit.insert };
-  }));
-  const to = view.state.doc.line(repair.line).from + repair.to;
-  view.dispatch({
-    changes,
-    selection: { anchor: changes.mapPos(to, 1) },
-    scrollIntoView: true,
-    userEvent: "input.complete",
-  });
-  if (repair.targetLine) goToKeyword(view, repair.targetLine);
-  view.focus();
-}
-
 function draftDiagnostic(state: EditorState, snapshot: string, issue: DraftIssue, severity: CMDiagnostic["severity"]): CMDiagnostic {
   const line = state.doc.line(issue.line);
-  const repairs = issue.repairs.map((repair) => ({
+  const repairs = issue.repairs.filter((repair) => checkedRepair(snapshot, compiledFor(state), repair)).map((repair) => ({
     name: repair.label,
     apply: (view: EditorView) => applyEditorRepair(view, snapshot, repair),
   }));
-  if (issue.targetLine && !repairs.length) repairs.push({
-    name: "Go to existing block",
+  if (issue.targetLine) repairs.push({
+    name: `Go to existing on line ${issue.targetLine}`,
     apply: (view) => { if (view.state.doc.toString() === snapshot) goToKeyword(view, issue.targetLine!); },
   });
   if (issue.ambiguous) repairs.push({

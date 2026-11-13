@@ -7,6 +7,8 @@ import { suggestContinuation, indentSuggestion } from "../src/lib/casespine/sugg
 import { contextFrom } from "../src/lib/casespine/assist";
 import { draftFromDescription, EXAMPLE_DESCRIPTIONS } from "../src/lib/casespine/copilot";
 import { draftIntent } from "../src/lib/casespine/intent";
+import { authoringSlot, upsertKey } from "../src/lib/casespine/edits";
+import { checkedRepair, keywordHelp } from "../src/lib/casespine/repairs";
 import { sha256Hex } from "../src/lib/sha256";
 
 const out = process.argv[2] ?? "./.test-out";
@@ -40,6 +42,127 @@ const check = (cond: boolean, msg: string) => { if (!cond) { failures++; console
   check(!!draftIntent("Please add a lane called Approvers", 1)?.compiled.root?.lanes.length, "plain-language lane from blank");
   check(!draftIntent(src + "\nfluffy unicorn on a trampoline", src.split("\n").length + 1), "unrelated text stays unresolved");
   check(!draftIntent(src + "\nNeed independent reviewers", src.split("\n").length + 1, "add rule invented metric >= 2"), "unknown model-invented rule probes are rejected");
+}
+
+{
+  // Build each repeated section from the editor's default repair and keep the original below it.
+  const sections = [
+    ["Lanes:", "  Case Owner:\n    Clearance: [REVIEW]", "Head of Compliance:", "lanes"],
+    ["Case File:", '  Documents:\n    Source: pdf("original.pdf")', "Policy Documents:", "caseFiles"],
+    ["Binding Lean Contract:", "  Rules:\n    - It is obligatory that reviewer 1 != reviewer 2 before Milestone StageExit.", "citation coverage", "rules"],
+    ["Process Flow:", "  - Stage 1 (Intake):\n      Steps:\n        - Receive the request\n      Reach Milestone: IntakeComplete", "Stage 2 (Review):", "stages"],
+    ["Business & Product Constraints:", "  Compliance: Document each release.", "Risk:", "constraints"],
+    ["Subcases:", "  - Subcase: Additional Review\n    Budget Ceiling: 1000 tokens or $0.05", "Additional Review 2", "subcases"],
+    ["AI Smart Suggestions:", '  - Suggest first_review: "Review current policies"', "Suggest policy_review:", "suggestions"],
+  ] as const;
+  for (const [header, existing, expected, collection] of sections) {
+    const original = `${header}\n${existing}`;
+    const source = `Case: Multiple sections\n${header}\n${original}`;
+    const compiled = compileSpec(source);
+    const lines = source.split("\n");
+    const [insert, go] = keywordHelp(lines, 2, contextFrom(compiled, 2, lines));
+    const accepted = insert?.repair && checkedRepair(source, compiled, insert.repair);
+    check(!!accepted && accepted.source.endsWith(original) && accepted.source.includes(expected), `insert ${header} above an existing block`);
+    check(!!accepted && accepted.compiled.root?.[collection].length === 2, `both ${header} entries reach the compiled case`);
+    check(go?.targetLine === 3 && !go.repair, `navigation for ${header} preserves source`);
+    check(!compiled.diagnostics.some((d) => d.severity === "error"), `empty second ${header} can be edited manually`);
+  }
+
+  const source = `Case: Multiple sections
+Lanes:
+  Intake:
+    Roles: [INTAKE]
+Lanes:
+  Reviewer:
+    Roles: [HITM_APPROVER]
+Case File:
+  Wire Policy:
+    Source: pdf("wire.pdf")
+Case File:
+  Review Policy:
+    Source: pdf("review.pdf")
+Process Flow:
+  - Stage 1 (Intake):
+      Steps:
+        - Screen inbound transfer
+      Steps:
+        - Record the risk score
+      Reach Milestone: IntakeComplete
+Process Flow:
+  - Stage 2 (Review):
+      When: Milestone IntakeComplete is achieved
+      Steps:
+        - Synthesize grounded answer with citations
+      On Breach:
+        Escalate To: Reviewer
+      Reach Milestone: ReviewComplete
+Binding Lean Contract:
+  Rules:
+    - It is obligatory that reviewer 1 != reviewer 2 before Milestone ReviewComplete.
+  Rules:
+    - It is obligatory that citation coverage >= 90% before Milestone ReviewComplete.
+Binding Lean Contract:
+  Rules:
+    - It is obligatory that p95 latency <= 2500 ms before Milestone ReviewComplete.
+Subcases:
+  - Subcase: Exceptions
+    Budget Ceiling: 1000 tokens or $0.05
+    Lanes:
+      Intake:
+        Roles: [EXCEPTION_INTAKE]
+    Lanes:
+      Exceptions Lead:
+Subcases:
+  - Subcase: Complaints
+    Budget Ceiling: 1000 tokens or $0.05
+Business & Product Constraints:
+  Compliance: Document each release.
+Business & Product Constraints:
+  Risk: Send exceptions to human review.
+`;
+  const result = compileSpec(source);
+  const root = result.root!;
+  check(!result.diagnostics.some((d) => d.severity === "error"), "repeatable blocks compile together");
+  check(root.lanes.map((l) => l.name).join() === "Intake,Reviewer" && root.stages[1].escalateTo === "Reviewer", "lanes from both blocks support escalation");
+  check(root.caseFiles.map((f) => f.sources[0]).join() === "wire.pdf,review.pdf", "case files from both blocks retain their sources");
+  check(root.stages.map((s) => s.idx).join() === "1,2" && root.stages[0].steps.length === 2, "process flow and steps preserve source order");
+  check(root.rules.length === 3 && root.constraints.length === 2, "contracts, rules and constraints keep all entries");
+  check(root.subcases.length === 2 && root.subcases[0].lanes.find((l) => l.name === "Intake")?.roles[0] === "EXCEPTION_INTAKE", "subcases retain local lane overrides");
+  check(root.subcases[1].lanes.every((l) => l.name !== "Exceptions Lead"), "the second subcase keeps separate lanes");
+  const edited = upsertKey(source, root, ["Case File", "Review Policy"], "Source", 'pdf("updated.pdf")');
+  check(compileSpec(edited).root?.caseFiles.map((f) => f.sources[0]).join() === "wire.pdf,updated.pdf", "field edit finds a collection in the second block");
+  const firstLane = root.lanes[0].line;
+  check(authoringSlot(source, root, "lane", firstLane)?.line === firstLane + 1, "toolbar adds entries in the focused block");
+  check(authoringSlot(source, root, "lane")?.line === root.lanes[1].line + 1, "toolbar otherwise appends to the last block");
+  const section = authoringSlot(source, root, "section", firstLane);
+  check(section?.line === firstLane + 1 && section.lines?.[0] === "", "Add section inserts after the focused block at case indentation");
+  for (const header of ["Steps:", "Rules:"]) {
+    const draft = source.replace(header, header + "\n" + (header === "Steps:" ? "      " : "  ") + header);
+    const lines = draft.split("\n");
+    const line = lines.findIndex((text) => text.trim() === header) + 1;
+    const compiled = compileSpec(draft);
+    const [insert] = keywordHelp(lines, line, contextFrom(compiled, line, lines));
+    const accepted = insert?.repair && checkedRepair(draft, compiled, insert.repair);
+    check(!!accepted && !accepted.compiled.diagnostics.some((d) => d.severity === "error"), `completing a second nested ${header} resolves the draft`);
+  }
+
+  for (const [before, after, expected] of [
+    ["  Reviewer:", "  intake:", /Lane "intake" already exists/],
+    ["  Review Policy:", "  Wire Policy:", /Case File "Wire Policy" already exists/],
+    ["Stage 2 (Review)", "Stage 1 (Review)", /Stage 1 already exists/],
+    ["Subcase: Complaints", "Subcase: Exception s", /shares an existing namespace/],
+    ["      Reach Milestone: ReviewComplete", "      On Breach:\n        Escalate To: Intake\n      Reach Milestone: ReviewComplete", /one breach escalation per stage/],
+    ["\nLanes:\n", "\nDeployment:\nDeployment:\nLanes:\n", /one `Deployment:` per case/],
+  ] as const) {
+    const duplicate = compileSpec(source.replace(before, after));
+    check(duplicate.diagnostics.some((d) => d.severity === "error" && expected.test(d.message)), `reject ambiguous duplicate ${after}`);
+  }
+  const arabic = "الحالة: مراجعة التحويل\nالمسارات:\nالمسارات:\n  مراجع الفرع:\n    الأدوار: [HITM_APPROVER]";
+  const ar = compileSpec(arabic);
+  const arLines = arabic.split("\n");
+  const [insert] = keywordHelp(arLines, 2, contextFrom(ar, 2, arLines));
+  const accepted = insert?.repair && checkedRepair(arabic, ar, insert.repair);
+  check(!!accepted && accepted.compiled.root?.lanes.map((l) => l.name).join() === "Case Owner,مراجع الفرع", "Arabic repeated heading keeps both lanes");
 }
 
 for (const s of ["", "abc", "x".repeat(1000), "CaseSpine ✓ نور الحكمة"]) {

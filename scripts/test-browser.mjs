@@ -223,29 +223,99 @@ try {
         await editor.press('End');
       }
     };
+    const compileInStudio = async () => {
+      await page.getByRole('button', {name: /^▶ Compile/}).click();
+      await page.getByRole('tab', {name: 'Lean 4', exact: true, selected: true}).waitFor();
+    };
+    const readCase = async () => {
+      await page.getByRole('tab', {name: 'IR', exact: true}).click();
+      return JSON.parse(await page.locator('pre.code-out').innerText()).cases[0];
+    };
+    const completionMenu = page.locator('.cm-tooltip-autocomplete');
+    const visual = page.getByRole('region', {name: 'Visual program'});
     const existingLanes = 'Lanes:\n  Branch Compliance Officer:\n    Roles: [HITM_APPROVER]';
     await setFragment('', existingLanes);
     await editor.press('ControlOrMeta+Home');
     await editor.press('ArrowDown');
     await page.keyboard.type('La', {delay: 80});
-    await page.locator('.cm-ghost').getByText(/Lanes: already on line/).waitFor();
-    await page.locator('.cm-tooltip-autocomplete').getByRole('option',{name:/Use existing Lanes/}).waitFor();
-    assert.equal(await page.locator('.cm-tooltip-autocomplete').getByRole('option',{name:/Population Segment/}).count(),0);
+    await page.locator('.cm-ghost').getByText(/nes:.*Case Owner:/s).waitFor();
+    await completionMenu.getByRole('option',{name:/Insert new Lanes block/}).waitFor();
+    assert.match(await completionMenu.getByRole('option').first().innerText(), /Insert new Lanes block/);
+    assert.equal(await completionMenu.getByRole('option',{name:/Population Segment/}).count(),0);
     await editor.press('ArrowRight');
-    assert.equal(await source(),'Case: Policy review\n\n'+existingLanes);
+    assert.match(await source(), /\nLanes:\n  Case Owner:/);
+    assert.ok((await source()).endsWith(existingLanes));
+    await visual.getByRole('button', {name: 'Case Owner', exact: true}).waitFor();
+    await visual.getByRole('button', {name: 'Branch Compliance Officer', exact: true}).waitFor();
+    await compileInStudio();
+    assert.deepEqual((await readCase()).lanes.map(lane => lane.name), ['Case Owner', 'Branch Compliance Officer']);
 
+    for (const fragment of ['Lanes:', 'Lane:', 'Lanes or what', 'Please add another Lanes block']) {
+      await setFragment(fragment, existingLanes);
+      const expected = fragment === 'Lanes:' ? /Case Owner:/ : /Lanes:.*Case Owner:/s;
+      await page.locator('.cm-ghost').getByText(expected).waitFor();
+      assert.equal(await source(), 'Case: Policy review\n' + fragment + '\n' + existingLanes);
+      await editor.press('Tab');
+      assert.match(await source(),/\nLanes:\n  Case Owner:\n    SSO Provider: Microsoft Entra ID\n    Roles: \[HITM_APPROVER\]/);
+      assert.ok((await source()).endsWith(existingLanes));
+    }
     for (const fragment of ['Lane:', 'Lanes or what']) {
       await setFragment(fragment);
       await page.locator('.cm-ghost-rewrite').getByText(/Lanes:.*Case Owner:/s).waitFor();
-      assert.match(await source(),new RegExp(fragment));
       await editor.press(fragment === 'Lane:' ? 'ArrowRight' : 'Tab');
-      assert.match(await source(),/\nLanes:\n  Case Owner:\n    SSO Provider: Microsoft Entra ID\n    Roles: \[HITM_APPROVER\]/);
+      assert.match(await source(),/\nLanes:\n  Case Owner:/);
     }
+    await setFragment('Lanes:', existingLanes);
+    await page.locator('.cm-ghost').getByText(/Case Owner:/).waitFor();
+    await editor.press('Enter');
+    await page.keyboard.type('Risk Review:');
+    assert.equal(await source(), 'Case: Policy review\nLanes:\n  Risk Review:\n' + existingLanes);
+    await compileInStudio();
+    assert.deepEqual((await readCase()).lanes.map(lane => lane.name), ['Risk Review', 'Branch Compliance Officer']);
+
+    await setFragment('La', existingLanes);
+    await editor.press('Control+Space');
+    await completionMenu.getByRole('option', {name: /Go to existing Lanes/}).waitFor();
+    await page.waitForTimeout(80); // CodeMirror's deliberate keyboard interaction delay.
+    await editor.press('ArrowDown');
+    await completionMenu.getByRole('option', {name: /Go to existing Lanes/, selected: true}).waitFor();
+    await editor.press('Tab');
+    assert.equal(await source(), 'Case: Policy review\nLa\n' + existingLanes);
+    assert.equal(await page.locator('.cm-activeLine').innerText(), 'Lanes:');
+
     await setFragment('Lane:', existingLanes);
+    await page.locator('.cm-ghost-rewrite').getByText(/Lanes:.*Case Owner:/s).waitFor();
     await editor.press('Escape');
     await page.locator('.cs-unfinished').filter({hasText:'Lane:'}).first().hover();
-    await page.getByRole('button',{name:/Use existing Lanes/}).click();
-    assert.equal(await source(),'Case: Policy review\n\n'+existingLanes);
+    await page.getByRole('button',{name:/Insert new Lanes block/}).click();
+    assert.match(await source(), /\nLanes:\n  Case Owner:/);
+    assert.ok((await source()).endsWith(existingLanes));
+
+    const repeated = [
+      ['Case File:', 'Case File:\n  Documents:\n    Source: pdf("wire.pdf")', /Policy Documents:/],
+      ['Business & Product Constraints:', 'Business & Product Constraints:\n  Compliance: Review every release.', /Risk:/],
+      ['Process Flow:', 'Process Flow:\n  - Stage 1 (Screen):\n      Steps:\n        - Screen incoming transfers\n      Reach Milestone: Screened', /Stage 2 \(Review\)/],
+    ];
+    for (const [fragment, existing, preview] of repeated) {
+      await setFragment(fragment, existing);
+      await page.locator('.cm-ghost').getByText(preview).waitFor();
+      await editor.press('ArrowRight');
+      assert.ok((await source()).endsWith(existing));
+      await compileInStudio();
+    }
+    assert.deepEqual((await readCase()).stages.map(stage => stage.name), ['Review', 'Screen']);
+    await editor.press('ControlOrMeta+End');
+    await add('Add section', /^Process Flow/);
+    await compileInStudio();
+    assert.deepEqual((await readCase()).stages.map(stage => [stage.name, stage.when]), [
+      ['Review', 'Request received'], ['Screen', 'Immediate'], ['Review', 'Milestone Screened is achieved'],
+    ]);
+
+    await setFragment('Deployment:', 'Deployment:\n  Residency: UAE');
+    assert.equal(await page.locator('.cm-ghost').count(), 0);
+    await page.getByRole('button', {name: /^▶ Compile/}).click();
+    assert.equal(await page.getByRole('button', {name: /⬇ .csar/}).isDisabled(), true);
+    checks.push('repeatable blocks insert in place, preserve existing entries and compile, with opt-in navigation and singleton validation');
 
     await setFragment('Lanes: Branch Compliance');
     await page.locator('.cm-ghost-rewrite').getByText(/Lanes:.*Branch Compliance:/s).waitFor();

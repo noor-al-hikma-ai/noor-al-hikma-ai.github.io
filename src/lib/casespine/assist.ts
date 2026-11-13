@@ -4,34 +4,20 @@
 import { Prec, StateEffect, StateField, type EditorState, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import { draftIntent, type IntentDraft } from "./intent";
-import { acceptCompletion, completionStatus, startCompletion } from "@codemirror/autocomplete";
+import { acceptCompletion, closeCompletion, completionStatus, selectedCompletionIndex, startCompletion } from "@codemirror/autocomplete";
 import { componentSpec } from "./configSchema";
-import { checkedRepair, keywordHelp, type KeywordHelp } from "./repairs";
+import { checkedRepair, keywordHelp, type KeywordHelp, type Repair } from "./repairs";
 import { buildTree } from "./tree";
 import { compileSpec } from "./analyze";
 import type { CompileResult } from "./types";
-import { ancestorsAt, indentOf, indentSuggestion, listOptions, translateKey, suggestContinuation, valueOptions, type SuggestContext } from "./suggest";
+import { ancestorsAt, contextForCase, indentOf, indentSuggestion, listOptions, translateKey, suggestContinuation, valueOptions, type SuggestContext } from "./suggest";
 
 export function contextFrom(res: CompileResult, line?: number, lines?: string[]): SuggestContext {
   const contains = (item: { line: number; endLine: number }) => line !== undefined && item.line <= line
     && (line <= item.endLine || (lines && indentOf(lines[line - 1]) > indentOf(lines[item.line - 1])
       && lines.slice(item.endLine, line - 1).every((text) => !text.trim() || /^\s*#/.test(text))));
   const c = [...res.cases].reverse().find(contains) ?? res.root;
-  const stages = c?.stages ?? [];
-  return {
-    roles: c?.lanes.flatMap((lane) => lane.roles),
-    clearances: c?.lanes.flatMap((lane) => lane.clearance),
-    caseFiles: c?.caseFiles.map((file) => file.name),
-    lanes: c?.lanes.map((lane) => lane.name) ?? [],
-    approvers: c?.lanes.filter((lane) => lane.roles.some((role) => /HITM|APPROVER/i.test(role))).map((lane) => lane.name),
-    milestones: [...new Set(stages.map((item) => item.milestone))],
-    stages,
-    stage: stages.find(contains),
-    subcaseBudget: c ? {
-      tokens: Math.max(0, c.guards.budgetTokens - c.subcases.reduce((used, subcase) => used + subcase.guards.budgetTokens, 0)),
-      usd: Math.max(0, c.guards.budgetUsd - c.subcases.reduce((used, subcase) => used + subcase.guards.budgetUsd, 0)),
-    } : undefined,
-  };
+  return contextForCase(c, c?.stages.find(contains));
 }
 
 // ------------------------------------------------------------------ ghost text
@@ -51,8 +37,8 @@ const dismissedDraft = StateField.define<number | null>({
   },
 });
 
-export function showIntentDraft(view: EditorView, draft: IntentDraft) {
-  view.dispatch({ effects: setGhost.of({ pos: view.state.doc.line(draft.line).to, text: draft.text, draft }) });
+export function showIntentDraft(view: EditorView, draft: IntentDraft, keyword?: KeywordHelp) {
+  view.dispatch({ effects: setGhost.of({ pos: view.state.doc.line(draft.line).to, text: draft.text, draft, keyword }) });
 }
 
 export const currentDraft = (state: EditorState) => state.field(ghostField, false)?.draft ?? null;
@@ -85,26 +71,32 @@ export function dismissIntentDraft(view: EditorView) {
 }
 
 export function goToKeyword(view: EditorView, line: number) {
+  closeCompletion(view);
   const target = view.state.doc.line(line);
-  view.dispatch({ selection: { anchor: target.to }, scrollIntoView: true, effects: setGhost.of(null) });
+  view.dispatch({ selection: { anchor: target.to }, scrollIntoView: true, effects: [setGhost.of(null), ignoreDraft.of(line)] });
+  view.focus();
+}
+
+export function applyEditorRepair(view: EditorView, snapshot: string, repair: Repair) {
+  if (view.state.doc.toString() !== snapshot) return;
+  const changes = view.state.changes([repair, ...(repair.more ?? [])].map((edit) => {
+    const line = view.state.doc.line(edit.line);
+    return { from: line.from + edit.from, to: line.from + edit.to, insert: edit.insert };
+  }));
+  const to = view.state.doc.line(repair.line).from + repair.to;
+  view.dispatch({
+    changes,
+    selection: { anchor: changes.mapPos(to, 1) },
+    scrollIntoView: true,
+    userEvent: "input.complete",
+  });
   view.focus();
 }
 
 export function useKeywordHelp(view: EditorView, help: KeywordHelp, snapshot: string) {
   if (view.state.doc.toString() !== snapshot) return;
-  if (help.targetLine) {
-    if (help.repair) {
-      if (!checkedRepair(snapshot, compileSpec(snapshot), help.repair)) return;
-      const line = view.state.doc.line(help.repair.line);
-      view.dispatch({ changes: { from: line.from, to: line.to, insert: "" }, userEvent: "input.complete" });
-    }
-    goToKeyword(view, help.targetLine);
-  } else if (help.repair) {
-    const edit = checkedRepair(snapshot, compileSpec(snapshot), help.repair);
-    if (!edit) return;
-    applySourcePreview(view, snapshot, edit.source);
-    view.focus();
-  }
+  if (help.targetLine) goToKeyword(view, help.targetLine);
+  else if (help.repair && checkedRepair(snapshot, compileSpec(snapshot), help.repair)) applyEditorRepair(view, snapshot, help.repair);
 }
 
 class GhostWidget extends WidgetType {
@@ -140,7 +132,7 @@ const ghostField = StateField.define<Ghost | null>({
   provide: (field) => EditorView.decorations.compute([field], (state) => {
     const g = state.field(field);
     if (!g) return Decoration.none;
-    const widget = new GhostWidget(g.text, !!g.draft || !!g.keyword);
+    const widget = new GhostWidget(g.text, !!g.draft);
     if (!g.draft || g.draft.append) return Decoration.set([Decoration.widget({ widget, side: 1 }).range(g.pos)]);
     const line = state.doc.line(g.draft.line);
     const start = line.from + indentOf(line.text);
@@ -169,32 +161,26 @@ export function ghostText(getCompiled: (s: EditorState) => CompileResult): Exten
           return;
         }
         const line = st.doc.lineAt(sel.head);
+        if (st.field(dismissedDraft) === line.number) return;
         const source = st.doc.toString();
         const lines = source.split("\n");
         const compiled = getCompiled(st);
         const context = contextFrom(compiled, line.number, lines);
-        if (sel.head === line.to && st.field(dismissedDraft) !== line.number && /^\s*(?:(?:hey|please|can you|could you)[,!]?\s+)*(?:add|create|insert|start|set|escalate|route)\s+/i.test(line.text)) {
+        if (sel.head === line.to && /^\s*(?:(?:hey|please|can you|could you)[,!]?\s+)*(?:add|create|insert|start|set|escalate|route)\s+/i.test(line.text)) {
           const draft = draftIntent(source, line.number);
           if (draft) {
             showIntentDraft(v, draft);
             return;
           }
         }
-        if (sel.head === line.to && st.field(dismissedDraft) !== line.number) {
+        if (sel.head === line.to) {
           const suggestion = keywordHelp(lines, line.number, context, () => buildTree(compiled.normalized))[0];
-          if (suggestion?.preview && suggestion.continuation === undefined) {
-            if (suggestion.targetLine) {
-              v.dispatch({ effects: setGhost.of({ pos: sel.head, text: "  " + suggestion.preview, keyword: suggestion }) });
-            } else if (suggestion.repair) {
-              const edit = checkedRepair(source, compiled, suggestion.repair);
-              if (edit) showIntentDraft(v, { line: line.number, text: suggestion.preview, ...edit });
-            }
-            return;
-          }
-          if (suggestion?.continuation) {
-            const preview = indentSuggestion(suggestion.continuation, indentOf(line.text));
-            const repair = { line: line.number, from: line.length, to: line.length, insert: preview, label: suggestion.label };
-            v.dispatch({ effects: setGhost.of(checkedRepair(source, compiled, repair) ? { pos: sel.head, text: preview } : null) });
+          if (suggestion?.repair) {
+            const edit = checkedRepair(source, compiled, suggestion.repair);
+            if (edit && suggestion.continuation) {
+              const preview = indentSuggestion(suggestion.continuation, indentOf(line.text));
+              v.dispatch({ effects: setGhost.of({ pos: sel.head, text: preview, keyword: suggestion }) });
+            } else if (edit) showIntentDraft(v, { line: line.number, text: suggestion.preview, ...edit }, suggestion);
             return;
           }
         }
@@ -215,20 +201,25 @@ export function ghostText(getCompiled: (s: EditorState) => CompileResult): Exten
     },
   );
   const accept = (view: EditorView) => {
-    if (acceptIntentDraft(view)) return true;
     const g = view.state.field(ghostField, false);
     if (g?.keyword) {
+      if ((selectedCompletionIndex(view.state) ?? 0) > 0) {
+        acceptCompletion(view);
+        return true;
+      }
+      closeCompletion(view);
       useKeywordHelp(view, g.keyword, view.state.doc.toString());
       return true;
     }
-    if (completionStatus(view.state) === "active") return acceptCompletion(view);
+    if (acceptIntentDraft(view)) return true;
+    if (completionStatus(view.state) === "active" && acceptCompletion(view)) return true;
     if (!g) return false;
     view.dispatch({ changes: { from: g.pos, insert: g.text }, selection: { anchor: g.pos + g.text.length }, effects: setGhost.of(null), userEvent: "input.complete" });
     return true;
   };
   const acceptWord = (view: EditorView) => {
     const g = view.state.field(ghostField, false);
-    if (!g || g.draft || g.keyword) return false;
+    if (!g || g.draft) return false;
     const m = /^\s*\S+/.exec(g.text);
     const chunk = m ? m[0] : g.text;
     view.dispatch({ changes: { from: g.pos, insert: chunk }, selection: { anchor: g.pos + chunk.length }, effects: setGhost.of(null) });
@@ -241,10 +232,11 @@ export function ghostText(getCompiled: (s: EditorState) => CompileResult): Exten
       && (ghost?.pos === selection.head || completionStatus(view.state) === "active") && accept(view);
   };
   const dismiss = (view: EditorView) => {
+    const completion = closeCompletion(view);
     if (dismissIntentDraft(view)) return true;
     const ghost = view.state.field(ghostField, false);
-    if (!ghost) return false;
-    view.dispatch({ effects: [setGhost.of(null), ...(ghost.keyword ? [ignoreDraft.of(view.state.doc.lineAt(ghost.pos).number)] : [])] });
+    if (!ghost) return completion;
+    view.dispatch({ effects: [setGhost.of(null), ignoreDraft.of(view.state.doc.lineAt(ghost.pos).number)] });
     return true;
   };
   return [

@@ -34,7 +34,8 @@ function slotEdit(source: string, c: CaseAST, line: number, target: AuthoringTar
 function sectionEdit(source: string, c: CaseAST, key: string, ctx: SuggestContext) {
   if (caseSections(source, c).has(key.toLowerCase())) return source;
   const block = sectionBlock(key, ctx);
-  return block ? slotEdit(source, c, c.line, "section", [key + ":", ...block]) : source;
+  const slot = block && authoringSlot(source, c, "section");
+  return block && slot ? insertAuthoring(source, slot, [key + ":", ...block]) : source;
 }
 
 export function continuationOptions(source: string, line: number, compiled: CompileResult, expandRepair = true): { level: string; options: Continuation[] } {
@@ -70,7 +71,7 @@ export function continuationOptions(source: string, line: number, compiled: Comp
 
   const drafts = collectDraftIssues(source, compiled, contextFor);
   const repair = drafts.find((issue) => issue.line === line)?.repairs[0];
-  if (repair && !repair.targetLine) {
+  if (repair) {
     const size = repair.insert.includes("\n") || repair.more?.length ? "block" : "entry";
     add("repair", repair.label, size, applyRepair(source, repair), true);
     const repaired = options[0];
@@ -82,7 +83,7 @@ export function continuationOptions(source: string, line: number, compiled: Comp
   }
   if (!repair) {
     const help = keywordHelp(lines, line, ctx, () => tree)[0];
-    if (help?.repair && !help.targetLine) add("keyword", help.label, "block", applyRepair(source, help.repair), true);
+    if (help?.repair) add("keyword", help.label, "block", applyRepair(source, help.repair), true);
     const pos = lines.slice(0, line).reduce((length, item) => length + item.length + 1, -1);
     const suffix = suggestContinuation(source, pos, ctx);
     if (suffix) add("continue", "Continue this line", suffix.includes("\n") ? "block" : "entry", source.slice(0, pos) + indentSuggestion(suffix, indentOf(text)) + source.slice(pos));
@@ -91,7 +92,7 @@ export function continuationOptions(source: string, line: number, compiled: Comp
   if (errors.length) {
     for (const issue of drafts.filter((item) => item.line !== line && errors.some((error) => error.line === item.line))) {
       const fix = issue.repairs[0];
-      if (fix && !fix.targetLine) add(`fix-${issue.line}`, `${fix.label} (line ${issue.line})`, "entry", applyRepair(source, fix));
+      if (fix) add(`fix-${issue.line}`, `${fix.label} (line ${issue.line})`, "entry", applyRepair(source, fix));
       if (options.length >= 4) break;
     }
     return { level, options };

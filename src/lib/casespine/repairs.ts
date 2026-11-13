@@ -1,6 +1,6 @@
 import { buildTree, normKey, parseKey, type SpecNode } from "./tree";
 import { compileSpec } from "./analyze";
-import { ancestorsAt, indentOf, indentSuggestion, keyLine, keywordBeforeColon, keywordId, lastMs, levelOf, listOptions, matchKeywords, sectionBlock, siblingKeyLines, valueOptions, type SuggestContext } from "./suggest";
+import { ancestorsAt, indentOf, indentSuggestion, isRepeatableBlock, keyLine, keywordBeforeColon, keywordId, lastMs, levelOf, listOptions, matchKeywords, sectionBlock, valueOptions, type SuggestContext } from "./suggest";
 import { CONSTRAINT_FACETS, RULE_TEMPLATES } from "./vocab";
 import { fieldSpec, formatValue, validateField } from "./configSchema";
 import type { CompileResult } from "./types";
@@ -15,7 +15,6 @@ interface RepairEdit {
 export interface Repair extends RepairEdit {
   label: string;
   more?: RepairEdit[];
-  targetLine?: number;
 }
 
 export interface DraftIssue {
@@ -67,43 +66,49 @@ export function keywordHelp(lines: string[], line: number, ctx: SuggestContext, 
   if (!matches.length) return [];
   const parsed = siblingNode(tree?.() ?? buildTree(lines.join("\n")), line);
   const children = parsed?.node.children ?? [];
-  const siblings = parsed?.siblings.filter((item) => item.line !== line && item.indent === start) ?? [];
-  const present = siblingKeyLines(lines, line - 1, start);
-  return matches.flatMap(({ key, label, question }): KeywordHelp[] => {
+  const siblings = parsed?.siblings.filter((item) => item.line !== line && item.indent === parsed.node.indent) ?? [];
+  const edits: KeywordHelp[] = [];
+  const navigation: KeywordHelp[] = [];
+  for (const { key, label, question } of matches) {
     const id = keywordId(key);
-    const existing = siblings.find((item) => keywordId(item.key ?? "") === id);
-    const target = existing?.line ?? (present.has(id) ? present.get(id)! + 1 : undefined);
-    const canonical = parsed?.node.key && keywordId(parsed.node.key) === id;
-    const block = sectionBlock(key, ctx);
-    const section = block && level !== "config";
+    const repeatable = isRepeatableBlock(key);
+    const canonical = parsedKey !== undefined && keywordId(parsedKey) === id;
+    const section = BLOCKS.has(id) && (level === "top" || level === "contract" || level === "stage");
     const lane = id === "lanes" && value ? inlineLane(value, ctx) : null;
-    if (canonical && !lane && (!target || value || !section || !["top", "contract", "stage"].includes(level))) return [];
+    const matching = siblings.filter((item) => keywordId(item.key ?? "") === id);
+    const target = (matching.find((item) => item.children.length || item.value) ?? matching[0])?.line;
+    if (repeatable && canonical && children.length && !value) continue;
     if (target) {
-      if (value || children.length) return [{
-        label: `Go to existing ${label}`, detail: `already defined on line ${target}`, preview: "", targetLine: target,
-        message: `\`${label}:\` already exists on line ${target}. Move these entries into that block.`,
-      }];
-      const name = `Use existing ${label}`;
-      return [{
-        label: name, detail: `line ${target}`, preview: `↳ ${label}: already on line ${target}`, targetLine: target,
-        message: `\`${label}:\` is already on line ${target}. Continue in that block.`,
-        repair: { label: name, line, from: 0, to: text.length, insert: "", targetLine: target },
-      }];
+      navigation.push({
+        label: `Go to existing ${label}`, detail: `line ${target}`, preview: "", targetLine: target,
+        message: repeatable ? `Open the ${label} block on line ${target}.` : `Use one \`${label}:\` here. The existing entry is on line ${target}.`,
+      });
+      if (!repeatable) continue;
     }
-    if (section && value && (!lane || children.length)) return [];
-    const suffix = lane ? ":\n" + lane.join("\n") : value ? ": " + value : children.length ? ":" : keyLine(key, level, ancestors, ctx);
-    const replacement = marker + label + suffix;
-    const fragment = text.slice(start).trimEnd();
+    if (canonical && !lane && (value || !section)) continue;
+    if (section && value && (!lane || children.length)) continue;
+    const block = section ? sectionBlock(key, ctx, line) : null;
+    if (section && !value && !children.length && !block) continue;
+    const fragment = text.slice(start);
+    let replacement: string;
+    if (lane) replacement = marker + label + ":\n" + lane.join("\n");
+    else if (value) replacement = marker + label + ": " + value;
+    else if (children.length) replacement = marker + label + ":";
+    else if (block) replacement = (canonical ? fragment : marker + label + ":") + "\n" + block.join("\n");
+    else replacement = marker + label + keyLine(key, level, ancestors, ctx, line);
     const continuation = !question && replacement.toLowerCase().startsWith(fragment.toLowerCase())
       ? replacement.slice(fragment.length) : undefined;
-    const name = section && !children.length ? `Insert ${label} block` : `Use ${label}`;
-    return [{
-      label: name, detail: section && !children.length ? "starter block" : "correct the field name",
-      message: section ? `Use \`${label}:\` to start this block.` : `Use \`${label}:\` for this field.`,
+    if (replacement === fragment) continue;
+    const startBlock = section && !children.length;
+    const name = startBlock ? `Insert ${target ? "new " : ""}${label} block` : `Use ${label}`;
+    edits.push({
+      label: name, detail: startBlock ? "starter block at the cursor" : "correct the field name",
+      message: startBlock ? `Add an entry under \`${label}:\` here.` : `Use \`${label}:\` for this ${section ? "block" : "field"}.`,
       preview: replacement, continuation,
       repair: { label: name, line, from: start, to: text.length, insert: indentSuggestion(replacement, start) },
-    }];
-  });
+    });
+  }
+  return [...edits, ...navigation];
 }
 
 const BLOCKS = new Set([
@@ -158,12 +163,13 @@ export function collectDraftIssues(src: string, compiled: CompileResult, context
       const suggestions = !node.key || errorLines.has(node.line) || BLOCKS.has(key) ? keywordHelp(lines, node.line, ctx(), () => tree) : [];
       if (suggestions.length) {
         const [first] = suggestions;
-        report(node, first.message, suggestions.slice(0, 3).flatMap(({ repair }) => repair ? [repair] : []), indentOf(text), false, first.targetLine);
+        const target = suggestions.find((suggestion) => suggestion.targetLine !== undefined)?.targetLine;
+        report(node, first.message, suggestions.slice(0, 3).flatMap(({ repair }) => repair ? [repair] : []), indentOf(text), false, target);
       }
 
       if (!suggestions.length && BLOCKS.has(key)) {
         if (!node.children.length && !node.value) {
-          const block = sectionBlock(node.key!, ctx());
+          const block = sectionBlock(node.key!, ctx(), node.line);
           report(node, "This section is unfinished. Add an entry inside it.", block ? [
             insertLines(lines, node.line, block.map((line) => " ".repeat(node.indent) + line), "Add the first entry"),
           ] : []);

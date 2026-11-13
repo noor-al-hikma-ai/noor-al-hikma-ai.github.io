@@ -1,8 +1,7 @@
 import { compileSpec } from "./analyze";
 import { componentSpec, fieldSpec } from "./configSchema";
 import { addStep, authoringSlot, insertAuthoring, upsertKey } from "./edits";
-import { ancestorsAt, indentOf, keyLine, keywordId, levelOf, sectionBlock, stageBlock } from "./suggest";
-import { buildTree, type SpecNode } from "./tree";
+import { ancestorsAt, contextForCase, indentOf, isRepeatableBlock, keyLine, keywordId, levelOf, matchKeywords, milestoneBefore, sectionBlock, stageBlock } from "./suggest";
 import { KEYWORDS, RULE_TEMPLATES } from "./vocab";
 import type { CaseAST, CompileResult } from "./types";
 
@@ -53,12 +52,9 @@ function stageAt(c: CaseAST, line: number) {
   return c.stages.find((stage) => stage.line <= line && line <= stage.endLine) ?? c.stages.at(-1);
 }
 
-function context(c: CaseAST) {
-  return { lanes: c.lanes.map((lane) => lane.name), stages: c.stages, milestones: c.stages.map((stage) => stage.milestone) };
-}
-
-function namedStage(c: CaseAST, title: string, step?: string) {
-  const block = stageBlock(context(c));
+function namedStage(c: CaseAST, line: number, title: string, step?: string) {
+  const ctx = contextForCase(c);
+  const block = stageBlock(ctx, milestoneBefore(ctx, line));
   if (title) block[0] = block[0].replace(/\(.*\)/, `(${nameOf(title, "Review")})`);
   if (step) block[3] = "      - " + shortValue(step);
   return block;
@@ -66,14 +62,7 @@ function namedStage(c: CaseAST, title: string, step?: string) {
 
 export function addNamedStage(src: string, c: CaseAST, title: string, step?: string): string {
   const slot = authoringSlot(src, c, "stage");
-  return slot ? insertAuthoring(src, slot, namedStage(c, title, step)) : src;
-}
-
-function findNode(nodes: SpecNode[], line: number): SpecNode | undefined {
-  for (const node of nodes) {
-    if (node.line === line) return node;
-    if (node.line < line && node.endLine >= line) return findNode(node.children, line);
-  }
+  return slot ? insertAuthoring(src, slot, namedStage(c, slot.line + 1, title, step)) : src;
 }
 
 function fieldEdit(src: string, c: CaseAST, line: number, key: string, value: string): string | null {
@@ -83,7 +72,7 @@ function fieldEdit(src: string, c: CaseAST, line: number, key: string, value: st
   const doc = KEYWORDS.find((entry) => keywordId(entry.key) === keywordId(key) && entry.level === level)
     ?? KEYWORDS.find((entry) => keywordId(entry.key) === keywordId(key));
   if (doc) {
-    if (sectionBlock(doc.key, context(c)) || keywordId(doc.key) === "case") return null;
+    if (sectionBlock(doc.key, contextForCase(c)) || keywordId(doc.key) === "case") return null;
     const block = { guards: "Cost & Traffic Guards", deployment: "Deployment", contract: "Binding Lean Contract", constraints: "Business & Product Constraints", actuators: "Actuators" };
     if (doc.level === "top") return upsertKey(src, c, [], doc.key, value);
     if (doc.level in block) return upsertKey(src, c, [block[doc.level as keyof typeof block]], doc.key, value);
@@ -109,17 +98,31 @@ function fieldEdit(src: string, c: CaseAST, line: number, key: string, value: st
   return component && field ? upsertKey(src, c, ["Config", component.name], field.key, value) : null;
 }
 
-function operation(src: string, c: CaseAST | null, line: number, command: string): { source: string; text: string } | null {
-  const clause = /^(?:(?:hey|please|can you|could you)[,!]?\s+)*(?:(?:add|create|insert|start)\s+(?:(?:a|an|the|new|first|second|third)\s+)*(case file|case|lane|stage|step|rule|gateway|subcase|constraint|component|proposal|section)\b\s*|((?:escalate|route)\s+to)\s+|set\s+)(.*)$/i.exec(command);
-  if (!clause) return null;
-  const kind = (clause[1] ?? (clause[2] ? "escalation" : "set")).toLowerCase();
-  const value = clause[3].trim().replace(/\s+please[.!]?$/i, "").replace(/[.!]$/, "");
+function parseCommand(command: string) {
+  const text = command.replace(/^(?:(?:hey|please|can you|could you)[,!]?\s+)*/i, "").trim()
+    .replace(/\s+please[.!?]?$/i, "").replace(/[.!?]$/, "");
+  const add = /^(?:add|create|insert|start)\s+(?:(?:a|an|another|the|new|first|second|third)\s+)*(.*)$/i.exec(text);
+  if (add) {
+    const block = /^(.+?)\s+block$/i.exec(add[1]);
+    const key = block && matchKeywords("top", [], block[1]).find((match) => match.kind !== "prefix")?.key;
+    if (key) return { kind: "section", value: key };
+    const entry = /^(case file|case|lane|stage|step|rule|gateway|subcase|constraint|component|proposal|section)\b\s*(.*)$/i.exec(add[1]);
+    return entry && { kind: entry[1].toLowerCase(), value: entry[2].trim() };
+  }
+  const edit = /^(escalate to|route to|set)\s+(.+)$/i.exec(text);
+  return edit && { kind: edit[1].toLowerCase() === "set" ? "set" : "escalation", value: edit[2].trim() };
+}
+
+function operation(src: string, c: CaseAST | null, line: number, command: string, inputIndent: number): { source: string; text: string } | null {
+  const intent = parseCommand(command);
+  if (!intent) return null;
+  const { kind, value } = intent;
   if (kind === "case" && !c) {
     const text = "Case: " + nameOf(value.replace(/^(?:named|called)\s+/i, ""), "My Business Case");
     return { source: src.replace(/^\n*/, "") ? text + "\n" + src : text, text };
   }
   if (!c) return null;
-  const ctx = context(c);
+  const ctx = contextForCase(c);
   if (kind === "lane" || kind === "stage" || kind === "rule" || kind === "gateway" || kind === "escalation") {
     const slot = authoringSlot(src, c, kind, line);
     if (!slot) return null;
@@ -127,7 +130,7 @@ function operation(src: string, c: CaseAST | null, line: number, command: string
     if (kind === "lane") block = laneLines(value, c);
     else if (kind === "stage") {
       const [title, step] = value.replace(/^(?:named|called)\s+/i, "").split(/\s+with\s+(?:a\s+)?step\s+/i, 2);
-      block = namedStage(c, title, step);
+      block = namedStage(c, slot.line + 1, title, step);
     } else if (kind === "rule") {
       const typed = value.replace(/^that\s+/i, "");
       if (!typed) return null;
@@ -177,17 +180,12 @@ function operation(src: string, c: CaseAST | null, line: number, command: string
   if (kind === "subcase" && value) {
     const name = nameOf(value.replace(/^(?:named|called)\s+/i, ""), "Additional Review");
     if (c.subcases.some((item) => item.name.toLowerCase() === name.toLowerCase())) return null;
-    const result = compileSpec(src);
-    const tree = buildTree(result.normalized);
-    const node = c.kind === "Subcase" ? findNode(tree, c.line) : undefined;
-    const siblings = node?.children ?? tree;
-    const section = siblings.find((item) => keywordId(item.key ?? "") === "subcases");
-    const indent = section?.children[0]?.indent ?? (section?.indent ?? (node ? node.indent + 2 : 0)) + 2;
     const text = `- Subcase: ${name}`;
-    const remaining = c.guards.budgetTokens - c.subcases.reduce((used, child) => used + child.guards.budgetTokens, 0);
-    if (remaining <= 0) return null;
-    const block = [text, `  Budget Ceiling: ${Math.min(1000, remaining)} tokens or $${Math.min(c.guards.budgetUsd, 0.05).toFixed(2)}`];
-    return { source: insertAuthoring(src, { line: section?.endLine ?? c.endLine, lines: [...(section ? [] : [" ".repeat(indent - 2) + "Subcases:"]), " ".repeat(indent)] }, block), text: block.join("\n") };
+    const budget = ctx.subcaseBudget!;
+    const slot = authoringSlot(src, c, "subcase", line);
+    if (!slot || budget.tokens <= 0) return null;
+    const block = [text, `  Budget Ceiling: ${Math.min(1000, budget.tokens)} tokens or $${Math.min(budget.usd, 0.05).toFixed(2)}`];
+    return { source: insertAuthoring(src, slot, block), text: block.join("\n") };
   }
   if (kind === "proposal") {
     const proposal = /^(.+?)\s+(?:reviewed|moderated)\s+by\s+(.+)$/i.exec(value);
@@ -198,12 +196,20 @@ function operation(src: string, c: CaseAST | null, line: number, command: string
   }
   if (kind === "section") {
     const key = KEYWORDS.find((entry) => entry.level === "top" && keywordId(entry.key) === keywordId(value))?.key;
-    if (!key || !sectionBlock(key, ctx)) return null;
+    if (!key) return null;
     const lines = src.split("\n");
     const slot = authoringSlot(src, c, "section")!;
     const indent = indentOf(slot.lines![0]);
-    if (lines.slice(c.line - 1, c.endLine).some((text) => indentOf(text) === indent && keywordId(text.trim().split(":")[0]) === keywordId(key))) return null;
-    const text = key + keyLine(key, "top", [], ctx);
+    if (!isRepeatableBlock(key) && lines.slice(c.line - 1, c.endLine).some((text) => indentOf(text) === indent && keywordId(text.trim().split(":")[0]) === keywordId(key))) return null;
+    // Put an explicit block request on the draft line when it is in this case's scope.
+    const inPlace = inputIndent === indent && line > c.line;
+    const body = sectionBlock(key, ctx, inPlace ? line : slot.line + 1);
+    if (!body) return null;
+    const text = [key + ":", ...body].join("\n");
+    if (inPlace) {
+      lines[line - 1] = text.split("\n").map((entry) => " ".repeat(indent) + entry).join("\n");
+      return { source: lines.join("\n"), text };
+    }
     return { source: insertAuthoring(src, slot, text.split("\n")), text };
   }
   return null;
@@ -221,7 +227,7 @@ export function draftIntent(src: string, line: number, command?: string): Intent
   const before = compileSpec(clean);
   const start = !before.root && !clean.trim() && !/\b(?:add|create|start|insert)\s+(?:(?:a|an|the|new)\s+)*case\b(?!\s+file\b)/i.test(input);
   const source = start ? "Case: My Business Case" : clean;
-  const draft = operation(source, start ? compileSpec(source).root : caseAt(before, line, lines), line, input);
+  const draft = operation(source, start ? compileSpec(source).root : caseAt(before, line, src.split("\n")), line, input, indentOf(original));
   if (!draft || draft.source === clean) return null;
   const draftSource = draft.source.replace(/\n+$/, "");
   const compiled = compileSpec(draftSource);

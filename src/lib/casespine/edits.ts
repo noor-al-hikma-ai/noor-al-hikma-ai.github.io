@@ -33,7 +33,7 @@ function childIndent(n: SpecNode): number {
   return n.children.length ? n.children[0].indent : n.indent + 2;
 }
 
-const same = (a: string, b: string) => normName(a) === normName(b) || normKey(a) === normKey(b);
+const same = (a: string, b: string) => normKey(a) === normKey(b) || (normName(a) !== "" && normName(a) === normName(b));
 
 /** Replace the value after the first colon of a line, keeping key and indentation. */
 export function replaceValueAtLine(src: string, line: number, value: string): string {
@@ -64,7 +64,7 @@ export function caseSections(src: string, c: CaseAST): Set<string> {
   return new Set(caseContainer(treeOf(src), c).nodes.map((node) => normKey(node.key)));
 }
 
-export type AuthoringTarget = "section" | "lane" | "stage" | "rule" | "escalation" | "gateway" | "constraint" | "proposal";
+export type AuthoringTarget = "section" | "lane" | "stage" | "rule" | "escalation" | "gateway" | "constraint" | "proposal" | "subcase";
 export interface AuthoringSlot {
   line: number;
   /** Lines to insert before the completion cursor. Omit when editing an existing value. */
@@ -75,7 +75,10 @@ export interface AuthoringSlot {
 export function authoringSlot(src: string, c: CaseAST, target: AuthoringTarget, cursorLine?: number): AuthoringSlot | null {
   const tree = treeOf(src);
   const container = caseContainer(tree, c);
-  if (target === "section") return { line: container.endLine, lines: [" ".repeat(container.indent)] };
+  if (target === "section") {
+    const line = container.nodes.find((node) => cursorLine !== undefined && node.line <= cursorLine && cursorLine <= node.endLine)?.endLine;
+    return { line: line ?? container.endLine, lines: [" ".repeat(container.indent)] };
+  }
   if (target === "escalation" || target === "gateway") {
     const stage = c.stages.find((s) => cursorLine !== undefined && s.line <= cursorLine && cursorLine <= s.endLine) ?? c.stages.at(-1);
     if (!stage) return null;
@@ -99,14 +102,18 @@ export function authoringSlot(src: string, c: CaseAST, target: AuthoringTarget, 
     };
   }
 
-  const key = { lane: "Lanes", stage: "Process Flow", rule: "Binding Lean Contract", constraint: "Business & Product Constraints", proposal: "AI Smart Suggestions" }[target];
-  const section = container.nodes.find((n) => normKey(n.key) === normKey(key));
+  const chooseSection = (nodes: SpecNode[], key: string) => {
+    const matches = nodes.filter((node) => normKey(node.key) === normKey(key));
+    return matches.find((node) => cursorLine !== undefined && node.line <= cursorLine && cursorLine <= node.endLine) ?? matches.at(-1);
+  };
+  const key = { lane: "Lanes", stage: "Process Flow", rule: "Binding Lean Contract", constraint: "Business & Product Constraints", proposal: "AI Smart Suggestions", subcase: "Subcases" }[target];
+  const section = chooseSection(container.nodes, key);
   const lines: string[] = [];
   let line = section?.endLine ?? container.endLine;
   let indent = section ? childIndent(section) : container.indent + 2;
   if (!section) lines.push(" ".repeat(container.indent) + key + ":");
   if (target === "rule") {
-    const rules = section?.children.find((n) => normKey(n.key) === "rules");
+    const rules = section && chooseSection(section.children, "Rules");
     if (rules) {
       line = rules.endLine;
       indent = childIndent(rules);
@@ -116,6 +123,22 @@ export function authoringSlot(src: string, c: CaseAST, target: AuthoringTarget, 
     }
   }
   return { line, lines: [...lines, " ".repeat(indent)] };
+}
+
+/** Find the longest existing prefix of the path, including the field to edit. */
+function matchingPath(nodes: SpecNode[], path: string[], depth = 0): SpecNode[] {
+  if (depth === path.length) return [];
+  const key = path[depth];
+  const exact = nodes.filter((node) => node.key?.toLowerCase() === key.toLowerCase());
+  const named = ["lanes", "case file"].includes(normKey(path[depth - 1]));
+  const matches = named || exact.length ? exact : nodes.filter((node) => node.key && same(node.key, key));
+  let best: SpecNode[] = [];
+  for (const node of matches) {
+    const match = [node, ...matchingPath(node.children, path, depth + 1)];
+    if (match.length > best.length) best = match;
+    if (best.length === path.length - depth) break;
+  }
+  return best;
 }
 
 export function insertAuthoring(src: string, slot: AuthoringSlot, block: string[]): string {
@@ -135,8 +158,9 @@ export function upsertKey(src: string, c: CaseAST, path: string[], key: string, 
   let nodes = cont.nodes;
   let indent = cont.indent;
   let parentEnd = cont.endLine;
+  const existing = matchingPath(nodes, [...path, key]);
   for (let i = 0; i < path.length; i++) {
-    const hit = nodes.find((n) => n.key && same(n.key, path[i]));
+    const hit = existing[i];
     if (!hit) {
       const block: string[] = [];
       let ind = indent;
@@ -162,7 +186,7 @@ export function upsertKey(src: string, c: CaseAST, path: string[], key: string, 
     indent = childIndent(hit);
     parentEnd = hit.endLine;
   }
-  const leaf = nodes.find((n) => n.key && same(n.key, key));
+  const leaf = existing[path.length];
   if (leaf) return replaceValueAtLine(src, leaf.line, value);
   return insertAfter(src, parentEnd, [" ".repeat(indent) + key + ": " + value]);
 }
