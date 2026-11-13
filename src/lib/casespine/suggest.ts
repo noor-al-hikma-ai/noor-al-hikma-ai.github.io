@@ -5,12 +5,15 @@
 
 import { AR_KEYS, hasArabic } from "./arabic";
 import { COMPONENTS, componentSpec, fieldSpec, formatValue, inlineDefaults, normName } from "./configSchema";
-import { normKey } from "./tree";
+import { normKey, parseList } from "./tree";
 import { KEYWORDS, PII_ENTITIES, RULE_TEMPLATES, STEP_TEMPLATES, VALUE_SUGGESTIONS } from "./vocab";
 
 export interface SuggestContext {
   lanes: string[];
   milestones: string[];
+  roles?: string[];
+  clearances?: string[];
+  caseFiles?: string[];
 }
 
 const AR_TO_EN = new Map(Object.entries(AR_KEYS));
@@ -195,6 +198,18 @@ function stageBlock(n: number, ctx: SuggestContext): string[] {
   ];
 }
 
+/** Items for list-valued fields, including identifiers declared in the case. */
+export function listOptions(key: string, ctx: SuggestContext): string[] {
+  const k = normKey(translateKey(key));
+  if (k === "roles") return [...new Set(["HITM_APPROVER", "CODE_OWNER", "CHIEF_RISK_ARCHITECT", "SHARIA_BOARD_AUDITOR", "DISPATCH_PLANNER", ...ctx.roles ?? []])];
+  if (k === "clearance") return [...new Set(["INTERNAL", "RETAIL_WIRE_INQUIRY", "GROUP_ROOT", ...ctx.clearances ?? []])];
+  if (k === "model ladder") return ["large", "medium", "small"];
+  if (k === "standards") return parseList(DEFAULTS[k]).concat("OMG-DMN-FEEL", "W3C-PROV-O");
+  if (["identity", "data governance", "import theorem packs", "converters", "engine"].includes(k))
+    return [...new Set((VALUE_SUGGESTIONS[k] ?? []).flatMap(parseList))];
+  return [];
+}
+
 /** Candidate values for `key` in context — used by ghost text, ▾ and hover. */
 export function valueOptions(key: string, anc: string[], ctx: SuggestContext): string[] {
   const k = normKey(translateKey(key));
@@ -215,9 +230,11 @@ export function valueOptions(key: string, anc: string[], ctx: SuggestContext): s
   }
   if (k === "escalate to") return ctx.lanes;
   if (k === "reach milestone") return [...new Set([...ctx.milestones, "CaseResolved"])];
-  if (k === "when") return [...ctx.milestones.map((m) => `Milestone ${m} is achieved`), "Request received", 'Case File "Documents" is loaded'];
+  if (k === "when") return [...ctx.milestones.map((m) => `Milestone ${m} is achieved`), "Request received", ...(ctx.caseFiles?.length ? ctx.caseFiles : ["Documents"]).map((name) => `Case File "${name}" is loaded`)];
   if (k === "then") return [`Emit Verified Answer and reach Milestone ${lastMs(ctx)}`];
   if (k === "approver" || k === "audience") return ctx.lanes;
+  const items = listOptions(key, ctx);
+  if (items.length && k !== "model ladder") return items.map((item) => `[${item}]`);
   const fromVocab = VALUE_SUGGESTIONS[k] ?? [];
   const def = DEFAULTS[k];
   return [...new Set([...(def ? [def] : []), ...fromVocab])];

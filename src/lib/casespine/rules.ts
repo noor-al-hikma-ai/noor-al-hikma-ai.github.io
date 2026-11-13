@@ -155,7 +155,8 @@ function parseClause(part: string, prev: Clause | null): Clause | null {
   const neg = /\b(?:is|are) not\b|\bnot\b/i.test(p);
   const cleaned = p.replace(/\bfor\s*\[[^\]]*\]/i, "").replace(/\b(is|are|has been|have been|not)\b/gi, " ");
   const words = cleaned.replace(/\(.*?\)/g, "").trim().split(/\s+/).filter(Boolean);
-  if (words.length >= 1 && words.length <= 7 && !/\d/.test(cleaned.replace(/\(.*?\)/g, ""))) {
+  const predicate = ALIASES.some(([pattern]) => pattern.test(p.toLowerCase())) || /\b(?:is|are|has been|have been)\b/i.test(p);
+  if (predicate && words.length >= 1 && words.length <= 7 && !/\d/.test(cleaned.replace(/\(.*?\)/g, ""))) {
     const { field } = resolveField(p.replace(/\bnot\b/gi, "").replace(/\s+/g, " "), "");
     const fieldName = field || camel(cleaned);
     if (!fieldName) return null;

@@ -4,7 +4,7 @@
 
 import { StreamLanguage, HighlightStyle, syntaxHighlighting, type StringStream } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
-import { autocompletion, snippetCompletion, type Completion, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
+import { autocompletion, snippetCompletion, startCompletion, type Completion, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
 import { hoverTooltip, EditorView } from "@codemirror/view";
 import { linter, lintGutter, type Diagnostic as CMDiagnostic } from "@codemirror/lint";
 import type { EditorState, Extension } from "@codemirror/state";
@@ -15,7 +15,7 @@ import { normKey } from "./tree";
 import { KEYWORDS, PII_ENTITIES, RULE_TEMPLATES, STEP_TEMPLATES } from "./vocab";
 import type { CompileResult } from "./types";
 import { COMPONENTS, componentSpec, fieldSpec, formatValue, inlineDefaults } from "./configSchema";
-import { ancestorsAt, levelOf, siblingKeys, translateKey, valueOptions, type Level } from "./suggest";
+import { ancestorsAt, levelOf, listOptions, siblingKeys, translateKey, valueOptions, type Level } from "./suggest";
 import { contextFrom, dropdowns, ghostText, rtlLines, showAllOptions } from "./assist";
 
 // ------------------------------------------------------------------ tokenizer
@@ -143,26 +143,79 @@ function caseSpineCompletions(ctx: CompletionContext): CompletionResult | null {
       options: [...new Set([...sctx.milestones, "IndexReady", "InquiryResolved", "CaseResolved"])].map((m) => ({ label: m, type: "constant", detail: sctx.milestones.includes(m) ? "reached in this case" : "new" })),
     };
   }
-  // PII entities inside [ ... ] after redact / PII phrases
-  const ent = /(redact|Scrub|for|حجب)\s*\[([^\]]*?)(\w*)$/i.exec(before);
-  if (ent) return { from: ctx.pos - ent[3].length, options: PII_ENTITIES.map((e) => ({ label: e, type: "enum", detail: "PII entity" })) };
+  const kv = /^\s*(?:-\s+)?([^:"'[{#\s][^:]*?):\s*(.*)$/.exec(before);
+  const inline = level === "config" && kv ? componentSpec(kv[1]) : undefined;
+  const mapStart = inline ? before.indexOf("{") : -1;
+  if (inline && mapStart >= 0 && !before.slice(mapStart).includes("}")) {
+    const fields = before.slice(mapStart + 1);
+    // A comma inside a bracketed list belongs to the current field.
+    const lastField = /(?:^|,)\s*([^:[\]{},]+):\s*([^{}]*)$/.exec(fields);
+    const field = lastField && fieldSpec(inline.name, lastField[1].trim());
+    if (field && !lastField[2].includes(",")) {
+      const typed = lastField[2];
+      const options = valueOptions(field.key, [inline.name, "config"], sctx);
+      const tail = /^[^,}\]]*/.exec(line.text.slice(ctx.pos - line.from))?.[0] ?? "";
+      if (options.length && field.type !== "multi") return {
+        from: ctx.pos - typed.length,
+        to: ctx.pos + tail.trimEnd().length,
+        options: options.map((label) => ({ label, type: "enum" })),
+        filter: !showAll,
+      };
+    }
+    if (!field) {
+      const partial = /(?:^|,)\s*([^:[\]{},]*)$/.exec(fields)?.[1];
+      if (partial !== undefined) return {
+        from: ctx.pos - partial.length,
+        options: inline.fields.filter((field) => !fields.toLowerCase().includes(field.key.toLowerCase() + ":"))
+          .map((field) => ({ label: field.key, apply: field.key + ": ", type: "property", info: field.doc })),
+      };
+    }
+  }
 
-  // Value position: "Key: value"
-  const kv = /^\s*(?:-\s+)?([^:"'[{#\s][^:]*?):\s+(.*)$/.exec(before);
+  const open = before.lastIndexOf("[");
+  const close = before.lastIndexOf("]");
+  if (open > close) {
+    const inlineKey = inline && /(?:^|,)\s*([^:,[\]{}]+):\s*$/.exec(before.slice(mapStart + 1, open))?.[1]?.trim();
+    const configList = inlineKey ? fieldSpec(inline.name, inlineKey)?.options
+      : kv && level === "config-fields" ? fieldSpec(anc[0], kv[1])?.options : undefined;
+    const items = configList ?? (/(?:redact|Scrub|for|حجب)\s*$/i.test(before.slice(0, open))
+      ? PII_ENTITIES : kv ? listOptions(kv[1], sctx) : []);
+    if (items.length) {
+      const list = before.slice(open + 1);
+      const lastComma = list.lastIndexOf(",");
+      const typed = list.slice(lastComma + 1).trimStart();
+      const from = ctx.pos - typed.length;
+      const rest = line.text.slice(ctx.pos - line.from);
+      const tail = /^[^,\]]*/.exec(rest)?.[0] ?? "";
+      const selected = list.slice(0, lastComma + 1).split(",").map((item) => item.trim());
+      const append = showAll && !typed.endsWith(",") && !tail && items.includes(typed);
+      return {
+        from: append ? ctx.pos : from,
+        to: ctx.pos + tail.length,
+        options: items.filter((item) => !selected.includes(item) && (!append || item !== typed))
+          .map((item) => ({ label: item, type: "enum", apply: (append ? ", " : "") + item })),
+        filter: !showAll,
+      };
+    }
+  }
+
   if (kv && level !== "rules" && level !== "steps") {
     const typed = kv[2];
+    const suffix = line.text.slice(ctx.pos - line.from);
+    if (typed.startsWith("[") && typed.includes("]") && !showAll) return null;
     const opts = valueOptions(kv[1], anc, sctx);
     if (!opts.length) return null;
     return {
       from: ctx.pos - typed.length,
-      options: opts.map((o, i) => ({ label: o, type: "text", boost: -i, detail: i === 0 ? "suggested" : undefined })),
+      to: ctx.pos + suffix.length,
+      options: opts.map((o, i) => ({ label: o, apply: (before.endsWith(":") ? " " : "") + o, type: "text", boost: -i, detail: i === 0 ? "suggested" : undefined })),
       filter: !showAll,
     };
   }
   // Start of an item / key
   const head = /^\s*(-\s+)?([^:]*)$/.exec(before);
   if (!head) return null;
-  if (!ctx.explicit && !showAll && head[2].length === 0 && !head[1]) return null;
+  if (!ctx.explicit && !showAll && head[2].length === 0 && !head[1] && before.length === 0) return null;
   const from = ctx.pos - head[2].length;
   if (level === "rules") {
     const ms = sctx.milestones[sctx.milestones.length - 1] ?? "InquiryResolved";
@@ -177,7 +230,13 @@ function caseSpineCompletions(ctx: CompletionContext): CompletionResult | null {
   if (level === "steps") {
     return { from, options: STEP_TEMPLATES.map((st) => ({ label: st, type: "method", detail: classifyStep(st).map((k) => KIND_META[k.kind].engine).join(" ") })) };
   }
-  if (level === "lane-name" || level === "cf-name" || level === "other") return null;
+  if (level === "lane-name" || level === "cf-name") {
+    const names = level === "lane-name" ? ["Case Owner", "Head of Compliance", ...sctx.lanes] : ["Policy Documents", "Evidence File"];
+    return { from, options: [...new Set(names)].map((name) => ({ label: name, apply: name + ":", type: "class" })) };
+  }
+  if (anc[0] === "subcases")
+    return { from, options: [snippetCompletion("Subcase: ${Name}", { label: "Subcase", type: "class" })] };
+  if (level === "other") return null;
   if (level === "process") {
     return {
       from,
@@ -245,7 +304,7 @@ const hover = hoverTooltip((view, pos) => {
   // Hover on the value: alternatives you can click (Visual Studio quick-pick).
   if (pos > keyEnd && rawValue && !rawValue.startsWith("{")) {
     const opts = valueOptions(k.key, anc, sctx);
-    if (opts.length < 2) return null;
+    if (listOptions(k.key, sctx).length || opts.length < 2) return null;
     const from = line.from + valueStart + (line.text.slice(valueStart).length - line.text.slice(valueStart).trimStart().length);
     const fs = level === "config-fields" ? fieldSpec(anc[0], k.key) : undefined;
     const head = document.createElement("div");
@@ -311,19 +370,30 @@ const lint = linter(
     for (const d of res.diagnostics) {
       if (d.line < 1 || d.line > view.state.doc.lines) continue;
       const l = view.state.doc.line(d.line);
+      if (!l.text.trim()) continue;
       const start = l.from + (l.text.length - l.text.trimStart().length);
-      out.push({ from: start, to: Math.max(start + 1, l.to), severity: d.severity, message: d.message, source: "casespine" });
+      out.push({ from: start, to: l.to, severity: d.severity, message: d.message, source: "casespine" });
     }
     return out;
   },
-  { delay: 250 },
+  { delay: 130 },
 );
 
 export function caseSpineLanguage(): Extension[] {
   return [
     casespineStream,
     syntaxHighlighting(highlight),
-    autocompletion({ override: [caseSpineCompletions], activateOnTyping: true, icons: false }),
+    autocompletion({ override: [caseSpineCompletions], activateOnTyping: true, activateOnTypingDelay: 65, icons: false }),
+    EditorView.updateListener.of((update) => {
+      if (!update.docChanged || !update.view.hasFocus) return;
+      const { head } = update.state.selection.main;
+      const line = update.state.doc.lineAt(head);
+      if (!/(?:[:[,]|^\s*)\s*$/.test(line.text.slice(0, head - line.from))) return;
+      const state = update.state;
+      requestAnimationFrame(() => {
+        if (update.view.state === state && update.view.hasFocus) startCompletion(update.view);
+      });
+    }),
     hover,
     lint,
     lintGutter(),

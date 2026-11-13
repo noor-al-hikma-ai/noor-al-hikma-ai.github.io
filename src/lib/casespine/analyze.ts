@@ -104,12 +104,17 @@ function readGuards(nodes: SpecNode[], g: Guards, diags: Diagnostic[]) {
         break;
       }
       default:
-        if (n.key) g.lines[k] = n.line;
+        if (!n.key)
+          diags.push({ line: n.line, severity: "error", message: "Expected a CaseSpine section or field here. Use `Keyword: value`, or prefix a comment with #." });
+        else if (n.key) g.lines[k] = n.line;
     }
   }
 }
 
-function readLanes(n: SpecNode): Lane[] {
+function readLanes(n: SpecNode, diags: Diagnostic[]): Lane[] {
+  for (const child of n.children) {
+    if (!child.key) diags.push({ line: child.line, severity: "error", message: "Expected a lane name followed by a colon." });
+  }
   return n.children
     .filter((c) => c.key)
     .map((c) => {
@@ -120,6 +125,12 @@ function readLanes(n: SpecNode): Lane[] {
         else if (k === "user") lane.user = f.value;
         else if (k === "roles") lane.roles = parseList(f.value);
         else if (k === "clearance") lane.clearance = parseList(f.value);
+        else diags.push({ line: f.line, severity: "error", message: "Expected SSO Provider, User, Roles, or Clearance in this lane." });
+        if (k === "roles" || k === "clearance") {
+          const value = f.value ?? "";
+          if ((value.includes("[") || value.includes("]")) && !/^\[[^\[\]]*\]$/.test(value))
+            diags.push({ line: f.line, severity: "error", message: "Close the list with ] and separate entries with commas." });
+        }
       }
       return lane;
     });
@@ -157,7 +168,7 @@ function readStages(n: SpecNode, diags: Diagnostic[]): Stage[] {
   for (const item of n.children) {
     const sm = /^Stage\s+(\d+)\s*(?:\((.*)\))?/i.exec(item.key ?? item.text);
     if (!sm) {
-      diags.push({ line: item.line, severity: "warning", message: "Process Flow items should look like `- Stage 1 (Name):`." });
+      diags.push({ line: item.line, severity: "error", message: "Process Flow items should look like `- Stage 1 (Name):`." });
       continue;
     }
     const st: Stage = {
@@ -271,7 +282,7 @@ function analyzeCase(
       case "solution archetype":
         node.archetype = v.trim();
         if (!ARCHETYPES.includes(node.archetype))
-          diags.push({ line: n.line, severity: "warning", message: `Unknown archetype "${node.archetype}". Known: ${ARCHETYPES.join(", ")}.` });
+          diags.push({ line: n.line, severity: "error", message: `Unknown archetype "${node.archetype}". Known: ${ARCHETYPES.join(", ")}.` });
         break;
       case "business deliverable":
         node.deliverable = v.trim();
@@ -284,7 +295,7 @@ function analyzeCase(
         node.population = v.trim();
         break;
       case "lanes":
-        node.lanes = [...node.lanes.filter((l) => !n.children.some((c) => c.key === l.name)), ...readLanes(n)];
+        node.lanes = [...node.lanes.filter((l) => !n.children.some((c) => c.key === l.name)), ...readLanes(n, diags)];
         break;
       case "case file":
         node.caseFiles = readCaseFiles(n, diags);
@@ -303,8 +314,8 @@ function analyzeCase(
               if (!rule.recognized)
                 diags.push({
                   line: r.line,
-                  severity: "warning",
-                  message: "Rule not formalised (compiled to `True`). Phrase it as `It is obligatory that <metric> >= <value> before Milestone <Name>.`",
+                  severity: "error",
+                  message: "Rule cannot be checked. Phrase it as `It is obligatory that <metric> >= <value> before Milestone <Name>.`",
                 });
             });
           }
@@ -360,7 +371,7 @@ function analyzeCase(
             if (!fs) diags.push({ line: comp.line, severity: "warning", message: `${spec.name} has no field "${k}". Available: ${spec.fields.map((f) => f.key).join(", ")}.` });
             else {
               const err = validateField(fs, v);
-              if (err) diags.push({ line: comp.line, severity: "warning", message: err });
+              if (err) diags.push({ line: comp.line, severity: "error", message: err });
             }
           }
         }
@@ -372,7 +383,9 @@ function analyzeCase(
         subNodes.push(...n.children);
         break;
       default:
-        if (n.key && !KNOWN_KEYS.has(k))
+        if (!n.key)
+          diags.push({ line: n.line, severity: "error", message: "Expected a CaseSpine section or field here. Use `Keyword: value`, or prefix a comment with #." });
+        else if (n.key && !KNOWN_KEYS.has(k))
           diags.push({ line: n.line, severity: "info", message: `Section "${n.key}" is not a core keyword; kept as extension metadata in the IR.` });
     }
   }
@@ -484,6 +497,7 @@ export function compileSpec(src: string): CompileResult {
   const ctx: Ctx = { diags, all: [] };
   const header = tree.find((n) => /^case$/i.test(normKey(n.key)));
   let root: CaseAST | null = null;
+  if (header && !header.value?.trim()) diags.push({ line: header.line, severity: "error", message: "Enter a name after Case:." });
   if (!header) {
     diags.push({ line: 1, severity: "error", message: "A CaseSpine document starts with `Case: <Business case name>`." });
   } else {

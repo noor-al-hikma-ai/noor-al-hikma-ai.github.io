@@ -4,11 +4,15 @@
 import { Prec, StateEffect, StateField, type EditorState, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import { startCompletion } from "@codemirror/autocomplete";
+import { componentSpec } from "./configSchema";
 import type { CompileResult } from "./types";
-import { ancestorsAt, indentSuggestion, suggestContinuation, valueOptions, type SuggestContext } from "./suggest";
+import { ancestorsAt, indentSuggestion, listOptions, translateKey, suggestContinuation, valueOptions, type SuggestContext } from "./suggest";
 
 export function contextFrom(res: CompileResult): SuggestContext {
   return {
+    roles: res.cases.flatMap((c) => c.lanes.flatMap((lane) => lane.roles)),
+    clearances: res.cases.flatMap((c) => c.lanes.flatMap((lane) => lane.clearance)),
+    caseFiles: [...new Set(res.cases.flatMap((c) => c.caseFiles.map((file) => file.name)))],
     lanes: [...new Set(res.cases.flatMap((c) => c.lanes.map((l) => l.name)))],
     milestones: [...new Set(res.cases.flatMap((c) => c.stages.map((s) => s.milestone)))],
   };
@@ -116,23 +120,23 @@ export function ghostText(getCompiled: (s: EditorState) => CompileResult): Exten
 export const showAllOptions = { next: false };
 
 class DropWidget extends WidgetType {
-  constructor(readonly lineEnd: number) {
+  constructor(readonly cursor: number, readonly label: string) {
     super();
   }
   eq(o: DropWidget) {
-    return o.lineEnd === this.lineEnd;
+    return o.cursor === this.cursor && o.label === this.label;
   }
   toDOM(view: EditorView) {
     const b = document.createElement("button");
     b.className = "cm-drop";
     b.type = "button";
     b.textContent = "▾";
-    b.title = "Show alternatives";
-    b.setAttribute("aria-label", "Show alternatives");
-    b.onmousedown = (e) => {
-      e.preventDefault();
+    b.title = `Show options for ${this.label}`;
+    b.setAttribute("aria-label", b.title);
+    b.onmousedown = (e) => e.preventDefault();
+    b.onclick = () => {
       view.focus();
-      view.dispatch({ selection: { anchor: this.lineEnd } });
+      view.dispatch({ selection: { anchor: this.cursor } });
       showAllOptions.next = true;
       startCompletion(view);
     };
@@ -143,7 +147,7 @@ class DropWidget extends WidgetType {
   }
 }
 
-const KV_RE = /^(\s*)(-\s+)?([^:"'[{#\s][^:]*?):\s+(\S.*)$/;
+const KV_RE = /^(\s*)(-\s+)?([^:"'[{#\s][^:]*?):(?:\s*(.*))$/;
 
 export function dropdowns(getCompiled: (s: EditorState) => CompileResult): Extension {
   const build = (view: EditorView): DecorationSet => {
@@ -156,9 +160,23 @@ export function dropdowns(getCompiled: (s: EditorState) => CompileResult): Exten
       while (pos <= to) {
         const line = st.doc.lineAt(pos);
         const m = KV_RE.exec(line.text);
-        if (m && !m[4].trim().startsWith("{")) {
+        if (m) {
           const anc = ancestorsAt(lines, line.number - 1, m[1].length);
-          if (valueOptions(m[3], anc, ctx).length > 1) out.push(Decoration.widget({ widget: new DropWidget(line.to), side: 1 }).range(line.to));
+          const key = m[3];
+          const list = listOptions(key, ctx).length > 0 || /(?:curation)/i.test(translateKey(key));
+          const close = list ? line.text.lastIndexOf("]") : -1;
+          const cursor = close >= 0 ? line.from + close : line.to;
+          const component = anc[0] === "config" && m[4].startsWith("{") ? componentSpec(key) : undefined;
+          if (component) {
+            for (const match of line.text.matchAll(/(?:\{|,)\s*([^:{},[\]]+):\s*([^,}\[]*)/g)) {
+              const field = component.fields.find((field) => field.key.toLowerCase() === match[1].trim().toLowerCase());
+              if (!field || !["select", "toggle", "lane"].includes(field.type)) continue;
+              const end = line.from + match.index + match[0].trimEnd().length;
+              out.push(Decoration.widget({ widget: new DropWidget(end, field.key), side: 1 }).range(end));
+            }
+          } else if (list || valueOptions(key, anc, ctx).length > 0) {
+            out.push(Decoration.widget({ widget: new DropWidget(cursor, key), side: 1 }).range(line.to));
+          }
         }
         pos = line.to + 1;
       }
