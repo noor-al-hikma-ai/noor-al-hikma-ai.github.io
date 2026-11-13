@@ -112,7 +112,11 @@ try {
     const upload=page.locator('input[type=file]');
     const uploadStart=performance.now();
     await upload.setInputFiles(resolve('public/samples/demo_bank_card_disputes.pdf'));
-    await page.getByText('Chunks indexed',{exact:true}).waitFor();
+    // A cold PDF upload fetches the lazy parser and its worker from the deployed site.
+    const indexed = page.getByText('Chunks indexed', {exact: true});
+    const uploadError = page.getByRole('alert').getByText(/Could not read/);
+    await indexed.or(uploadError).first().waitFor({timeout: 15000});
+    if (await uploadError.count()) assert.fail(await uploadError.first().innerText());
     console.log('PDF ingestion ms', Math.round(performance.now()-uploadStart));
     await page.getByRole('button',{name:'Clear',exact:true}).click();
     const sentinel='The reserve vault requires a sapphire access badge. Supervisors maintain the sapphire badge register and approve replacements.';
@@ -358,8 +362,7 @@ try {
     assert.equal(await source(),'Case: Policy review');
     await editor.press('ArrowRight');
     assert.match(await source(),/Lanes:[\s\S]*Case File:[\s\S]*Process Flow:/);
-    await page.getByRole('button',{name:/^▶ Compile/}).click();
-    await page.getByText(/Compiled · 1 case/).waitFor();
+    await compileInStudio();
     checks.push('contextual keyword ranking, in-place fixes, existing blocks, strict syntax gating, related block previews, and Tab/Right Arrow');
 
     await replaceSpec('Case: Policy review\nBusiness & Product Constraints: ');
@@ -386,8 +389,7 @@ try {
     await page.locator('.cs-unrecognized').getByText('blorp coffee xyz').hover();
     await page.getByRole('button', {name: /Keep as a # comment/}).click();
     assert.equal(await source(), authored + '\n# blorp coffee xyz');
-    await page.getByRole('button', { name: /^▶ Compile/ }).click();
-    await page.getByText(/Compiled · 1 case/).waitFor();
+    await compileInStudio();
     checks.push('constraint ghost text, section repair preserving intent, list repair, and comment fallback');
 
     const canvas = page.getByRole('region', {name: 'Visual program'});
